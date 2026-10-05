@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
