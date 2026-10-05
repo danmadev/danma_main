@@ -469,7 +469,11 @@ void check_tensor_metadata(const at::Tensor& tensor) {
       tensor.is_cpu() || tensor.device().type() == c10::DeviceType::PrivateUse1,
       "DANMA supports only CPU <-> remote tensor transfers");
   TORCH_CHECK(tensor.scalar_type() == at::kFloat, "DANMA supports float32 only");
-  TORCH_CHECK(tensor.is_contiguous(), "DANMA supports contiguous tensors only");
+  if (tensor.device().type() == c10::DeviceType::PrivateUse1) {
+    TORCH_CHECK(
+        tensor.is_contiguous(),
+        "DANMA remote tensor kernels currently require contiguous device tensors");
+  }
 }
 
 at::Tensor custom_empty_memory_format(
@@ -518,12 +522,17 @@ at::Tensor custom_copy_from(
   TORCH_CHECK(self.sizes() == dst.sizes(), "DANMA copy shape mismatch");
 
   if (self.is_cpu() && dst.device().type() == c10::DeviceType::PrivateUse1) {
+    // Autograd commonly hands device copies expanded/strided CPU gradients.
+    // Materialize only a transient CPU transfer view; DANMA device payload
+    // remains exclusively in Rust remote storage.
+    const auto host = self.is_contiguous() ? self : self.contiguous();
     remote_upload(
         remote_handle(dst),
-        self.const_data_ptr<float>(),
-        static_cast<size_t>(self.numel()));
+        host.const_data_ptr<float>(),
+        static_cast<size_t>(host.numel()));
   } else if (
       self.device().type() == c10::DeviceType::PrivateUse1 && dst.is_cpu()) {
+    TORCH_CHECK(dst.is_contiguous(), "DANMA download destination must be contiguous");
     remote_download(
         remote_handle(self),
         dst.mutable_data_ptr<float>(),
@@ -562,7 +571,11 @@ at::Tensor custom_to_device(
       false,
       memory_format);
   if (self.is_cpu() && device.type() == c10::DeviceType::PrivateUse1) {
-    remote_upload(remote_handle(out), self.const_data_ptr<float>(), static_cast<size_t>(self.numel()));
+    const auto host = self.is_contiguous() ? self : self.contiguous();
+    remote_upload(
+        remote_handle(out),
+        host.const_data_ptr<float>(),
+        static_cast<size_t>(host.numel()));
   } else if (self.device().type() == c10::DeviceType::PrivateUse1 && device.is_cpu()) {
     remote_download(remote_handle(self), out.mutable_data_ptr<float>(), static_cast<size_t>(self.numel()));
   } else if (
