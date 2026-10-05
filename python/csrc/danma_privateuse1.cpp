@@ -8,13 +8,97 @@
 #include <atomic>
 #include <cstring>
 
-namespace at {
-namespace detail {
-C10_REGISTER_GUARD_IMPL(
-    PrivateUse1,
-    c10::impl::NoOpDeviceGuardImpl<DeviceType::PrivateUse1>);
-} // namespace detail
-} // namespace at
+namespace {
+
+struct DanmaDeviceGuard final : c10::impl::DeviceGuardImplInterface {
+  c10::DeviceType type() const override {
+    return c10::DeviceType::PrivateUse1;
+  }
+
+  c10::Device exchangeDevice(c10::Device device) const override {
+    TORCH_CHECK(
+        device.type() == c10::DeviceType::PrivateUse1 &&
+            (device.index() == 0 || device.index() == -1),
+        "DANMA exposes only device index 0");
+    return c10::Device(c10::DeviceType::PrivateUse1, 0);
+  }
+
+  c10::Device getDevice() const override {
+    return c10::Device(c10::DeviceType::PrivateUse1, 0);
+  }
+
+  void setDevice(c10::Device device) const override {
+    TORCH_CHECK(
+        device.type() == c10::DeviceType::PrivateUse1 &&
+            (device.index() == 0 || device.index() == -1),
+        "DANMA exposes only device index 0");
+  }
+
+  void uncheckedSetDevice(c10::Device) const noexcept override {}
+
+  c10::Stream getStream(c10::Device) const noexcept override {
+    return c10::Stream(
+        c10::Stream::DEFAULT,
+        c10::Device(c10::DeviceType::PrivateUse1, 0));
+  }
+
+  c10::Stream getDefaultStream(c10::Device) const override {
+    return getStream(getDevice());
+  }
+
+  c10::Stream getNewStream(c10::Device, int priority = 0) const override {
+    (void)priority;
+    return getStream(getDevice());
+  }
+
+  c10::Stream exchangeStream(c10::Stream) const noexcept override {
+    return getStream(getDevice());
+  }
+
+  c10::DeviceIndex deviceCount() const noexcept override {
+    return 1;
+  }
+
+  // DANMA TCP v1 is synchronous. A recorded event is therefore complete as
+  // soon as record() returns; no background device work remains to wait for.
+  void record(
+      void** event,
+      const c10::Stream&,
+      const c10::DeviceIndex,
+      const c10::EventFlag) const override {
+    if (*event == nullptr) {
+      *event = new bool(true);
+    } else {
+      *static_cast<bool*>(*event) = true;
+    }
+  }
+
+  void block(void*, const c10::Stream&) const override {}
+
+  bool queryEvent(void* event) const override {
+    return event == nullptr || *static_cast<bool*>(event);
+  }
+
+  void destroyEvent(void* event, const c10::DeviceIndex) const noexcept override {
+    delete static_cast<bool*>(event);
+  }
+
+  bool queryStream(const c10::Stream&) const override {
+    return true;
+  }
+
+  void synchronizeStream(const c10::Stream&) const override {}
+  void synchronizeEvent(void*) const override {}
+  void synchronizeDevice(const c10::DeviceIndex) const override {}
+
+  double elapsedTime(void*, void*, const c10::DeviceIndex) const override {
+    return 0.0;
+  }
+};
+
+} // namespace
+
+C10_REGISTER_GUARD_IMPL(PrivateUse1, DanmaDeviceGuard);
 
 namespace {
 
