@@ -1,9 +1,14 @@
-"""CPU tensor/autograd bridge to a distributed DANMA neuron cluster.
+"""PyTorch bridge to distributed DANMA neurons."""
 
-This package does not register a PrivateUse1 device and does not make
-torch.device("danma:0") available. Remote neuron weights are owned by DANMA.
-"""
+from .backend import enable_privateuse1, privateuse1_stats
 from .client import DANMAClient, DANMAError, DANMATransportError
 from .layer import DANMALinear
 
-__all__ = ["DANMAClient", "DANMAError", "DANMATransportError", "DANMALinear"]
+__all__ = [
+    "DANMAClient",
+    "DANMAError",
+    "DANMATransportError",
+    "DANMALinear",
+    "enable_privateuse1",
+    "privateuse1_stats",
+]
