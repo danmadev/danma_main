@@ -1,9 +1,9 @@
 """Fail-closed PrivateUse1 proof for the DANMA PyTorch integration.
 
-These tests prove two separate properties:
-1. a tensor can genuinely carry the PrivateUse1/DANMA dispatch key; and
-2. DANMALinear changes the remote Rust neuron's state, so the affine math
-   cannot be satisfied by an ordinary PyTorch CPU linear fallback.
+These tests prove three separate properties:
+1. a tensor genuinely carries the PrivateUse1/DANMA dispatch key;
+2. unsupported operators cannot silently execute through a CPU fallback; and
+3. DANMALinear forward/backward requires and mutates the real Rust neuron.
 """
 
 from __future__ import annotations
@@ -17,7 +17,13 @@ from pathlib import Path
 
 import torch
 
-from danma_torch import DANMAClient, DANMALinear, enable_privateuse1
+from danma_torch import (
+    DANMAClient,
+    DANMALinear,
+    DANMATransportError,
+    enable_privateuse1,
+    privateuse1_stats,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -73,6 +79,8 @@ class SingleNode:
 class PrivateUse1Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        # PyTorch 2.8 sizes accelerator autograd queues when its Engine first
+        # starts. Register DANMA before the first backward in this process.
         enable_privateuse1()
 
     def test_danma_device_is_privateuse1_and_has_no_cpu_operator_fallback(self) -> None:
@@ -84,10 +92,28 @@ class PrivateUse1Tests(unittest.TestCase):
         self.assertFalse(tensor.is_cpu)
         torch.testing.assert_close(tensor.to("cpu"), host)
 
-        # Deliberately unsupported: a fallback to CPU would make this succeed.
-        # DANMA must fail closed instead of silently executing ATen math on CPU.
+        stats = privateuse1_stats()
+        self.assertFalse(stats["cpu_fallback"])
+        self.assertGreaterEqual(int(stats["allocations"]), 1)
+        self.assertGreaterEqual(int(stats["copies"]), 2)
+
+        # Deliberately unsupported: a generic CPU fallback would make this
+        # succeed. DANMA must fail closed instead.
         with self.assertRaises((RuntimeError, NotImplementedError)):
             _ = tensor + tensor
+
+    def test_danma_forward_has_no_local_fallback_when_rust_node_is_down(self) -> None:
+        cluster = SingleNode()
+        model = DANMALinear(
+            cluster.client,
+            neuron_ids=(11,),
+            input_ids=(901, 902),
+        )
+        inputs = torch.tensor([1.0, 2.0], dtype=torch.float32).to("danma:0")
+        cluster.stop()
+
+        with self.assertRaises(DANMATransportError):
+            model(inputs)
 
     def test_danma_tensor_forward_backward_mutates_remote_rust_neuron(self) -> None:
         cluster = SingleNode()
@@ -113,8 +139,8 @@ class PrivateUse1Tests(unittest.TestCase):
                 torch.tensor([8.0], dtype=torch.float32),
             )
 
-            # Loss math is intentionally ordinary CPU PyTorch. The affine
-            # forward/backward itself must still cross the DANMA TCP boundary.
+            # Loss reduction is ordinary PyTorch CPU bookkeeping. The affine
+            # forward/backward itself crosses the DANMA TCP boundary.
             output.to("cpu").sum().backward()
 
             after = cluster.client.inspect(11)
@@ -128,6 +154,18 @@ class PrivateUse1Tests(unittest.TestCase):
             torch.testing.assert_close(
                 inputs.grad.to("cpu"),
                 torch.tensor([2.0, 3.0], dtype=torch.float32),
+            )
+
+            # A second inference sees the new Rust-owned parameters, not a
+            # local cached torch.nn.Linear parameter set.
+            model.eval()
+            with torch.no_grad():
+                updated = model(inputs.detach()).to("cpu")
+            torch.testing.assert_close(
+                updated,
+                torch.tensor([7.4], dtype=torch.float32),
+                atol=1e-6,
+                rtol=0,
             )
         finally:
             cluster.stop()
