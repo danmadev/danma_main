@@ -24,6 +24,18 @@ Run the full end-to-end test against three *separate* real Rust processes:
     PYTHONPATH=python DANMA_NODE_BIN=target/debug/danma-node \
       python -m unittest discover -s python/tests -v
 
+Run the deterministic multi-epoch convergence benchmark directly:
+
+    python -m danma_torch.training_benchmark \
+      --node-binary target/debug/danma-node --epochs 30
+
+The benchmark trains three output neurons owned by three separate DANMA
+processes on a four-sample linear-regression problem. It reports the initial
+and final full-dataset loss, loss-reduction factor, remote parameter versions,
+and the maximum parameter error against an equivalent sequential
+`torch.optim.SGD(lr=0.1)` CPU run. CI requires the 30-epoch run to reduce
+loss by at least 50x and to match the PyTorch reference numerically.
+
 ## Start a simple three-node layer
 
 The first node owns neuron 11 with host inputs 901 and 902:
@@ -43,8 +55,7 @@ The second node owns neuron 21:
 The third node owns neuron 31:
 
     cargo run -p danma-net --bin danma-node -- \
-      --id 3 --listen 127.0.0.1:9103 \
-      --neuron 31 --weight 901:0.5 --weight 902:-2 \
+      --id 3 --listen 127.0.0.1:9103 --neuron 31 --weight 901:0.5 --weight 902:-2 \
       --peer 1@127.0.0.1:9101 --peer 2@127.0.0.1:9102
 
 After gossip converges, train from ordinary PyTorch:
