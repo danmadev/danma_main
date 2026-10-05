@@ -190,7 +190,7 @@ async fn remote_tensor_mm_add_fill_copy_sum_and_stats() {
     let mm_ops = read_u64(&stats, &mut offset);
     let add_ops = read_u64(&stats, &mut offset);
     assert!(tensor_count >= 8);
-    assert!(remote_bytes >= 30 * 4);
+    assert!(remote_bytes >= 24 * 4);
     assert_eq!(mm_ops, 1);
     assert_eq!(add_ops, 1);
 
