@@ -1,4 +1,4 @@
-"""Registration for the fail-closed DANMA PrivateUse1 device."""
+"""Registration and diagnostics for the DANMA PrivateUse1 device."""
 
 from __future__ import annotations
 
@@ -38,16 +38,21 @@ class _DanmaDeviceModule:
         _ = int(seed)
 
 
-def enable_privateuse1() -> torch.device:
-    """Register PrivateUse1 as danma and return torch.device('danma:0').
+def enable_privateuse1(
+    host: str = "127.0.0.1",
+    port: int = 9101,
+) -> torch.device:
+    """Register PrivateUse1 as danma and bind it to one Rust entry node.
 
-    The backend deliberately provides no catch-all CPU fallback. Only storage,
-    CPU-to-DANMA staging copies, and operators explicitly implemented by DANMA
-    are allowed.
+    PrivateUse1 tensor payload is remote Rust-owned storage. The local c10
+    allocator contains only an opaque handle. Native DANMA operators fail if
+    the configured node is unavailable; there is no generic CPU fallback.
     """
     global _ENABLED
 
-    from . import _C  # noqa: F401
+    from . import _C
+
+    _C.configure_endpoint(host, port)
 
     current = torch._C._get_privateuse1_backend_name()
     if current == "privateuseone":
@@ -76,13 +81,25 @@ def enable_privateuse1() -> torch.device:
 
 
 def privateuse1_stats() -> dict[str, int | bool | str]:
-    """Return proof-oriented backend diagnostics."""
-    enable_privateuse1()
+    """Return local handle counters and live Rust tensor-runtime counters."""
     from . import _C
+
+    remote = list(_C.remote_stats())
+    while len(remote) < 7:
+        remote.append(0)
 
     return {
         "device": str(torch.device("danma:0")),
         "cpu_fallback": False,
+        "storage": "remote_rust",
+        "host_payload_bytes": int(_C.host_payload_bytes()),
         "allocations": int(_C.allocation_count()),
         "copies": int(_C.copy_count()),
+        "remote_tensor_count": int(remote[0]),
+        "remote_bytes": int(remote[1]),
+        "remote_mm_ops": int(remote[2]),
+        "remote_add_ops": int(remote[3]),
+        "remote_allocations": int(remote[4]),
+        "remote_uploads": int(remote[5]),
+        "remote_downloads": int(remote[6]),
     }
