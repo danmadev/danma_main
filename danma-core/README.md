@@ -55,10 +55,13 @@ or establish a gossip overlay.
    implemented in danma-net.
 3. Durable atomic weight-update + dedup journaling and checkpoint/replay.
    The current once-per-EventID effect is in-memory, for one owning actor.
-4. PyTorch PrivateUse1 and TensorFlow PluggableDevice adapters; this crate is
-   the backend that those adapters will eventually call through a shared ABI.
-5. Dynamic synapse replacement, recurrent-cycle semantics, arbitrary tensor
-   kernels, convergence benchmarks and billion-neuron scaling.
+4. TensorFlow PluggableDevice and a broad ATen operator surface. The Python
+   integration now has a fail-closed PyTorch PrivateUse1 device for the
+   DANMALinear path; arbitrary tensor kernels are still not implemented here.
+5. Dynamic synapse replacement, recurrent-cycle semantics, broad tensor
+   kernels, asynchronous convergence studies and billion-neuron scaling. A
+   deterministic multi-epoch linear-regression convergence benchmark now
+   covers the current PyTorch/DANMA path.
 
 ## Invariants to preserve in the next slice
 
