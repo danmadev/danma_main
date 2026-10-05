@@ -41,7 +41,7 @@ jobs:
         run: cargo build --locked -p danma-net --bin danma-node
       - name: Verify CPU core, shards and TCP contracts
         run: cargo test --locked -p danma-core -p danma-shard -p danma-net --all-targets
-      - name: Run PyTorch autograd integration tests
+      - name: Run PyTorch autograd and convergence integration tests
         env:
           DANMA_NODE_BIN: target/debug/danma-node
         run: python -m unittest discover -s python/tests -v
