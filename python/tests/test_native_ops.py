@@ -63,12 +63,15 @@ class SingleNode:
 class NativeAtenTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.node = SingleNode()
-        enable_privateuse1("127.0.0.1", cls.node.port)
+        # Register PrivateUse1 before the first autograd Engine use.
+        enable_privateuse1()
 
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.node.stop()
+    def setUp(self) -> None:
+        self.node = SingleNode()
+        enable_privateuse1("127.0.0.1", self.node.port)
+
+    def tearDown(self) -> None:
+        self.node.stop()
 
     def test_mm_and_add_execute_in_remote_tensor_runtime(self) -> None:
         device = torch.device("danma:0")
