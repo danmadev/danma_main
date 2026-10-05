@@ -39,6 +39,7 @@ def free_port() -> int:
 class SingleNode:
     def __init__(self) -> None:
         port = free_port()
+        self.port = port
         self.process = subprocess.Popen(
             [
                 str(NODE_BINARY),
@@ -79,31 +80,38 @@ class SingleNode:
 class PrivateUse1Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        # PyTorch 2.8 sizes accelerator autograd queues when its Engine first
-        # starts. Register DANMA before the first backward in this process.
+        # Register dispatch/autograd before the first backward. Each test
+        # points the remote tensor allocator at its own Rust node.
         enable_privateuse1()
 
     def test_danma_device_is_privateuse1_and_has_no_cpu_operator_fallback(self) -> None:
-        device = torch.device("danma:0")
-        host = torch.tensor([1.25, -2.5], dtype=torch.float32)
-        tensor = host.to(device)
+        cluster = SingleNode()
+        try:
+            enable_privateuse1("127.0.0.1", cluster.port)
+            device = torch.device("danma:0")
+            host = torch.tensor([1.25, -2.5], dtype=torch.float32)
+            tensor = host.to(device)
 
-        self.assertEqual(tensor.device.type, "danma")
-        self.assertFalse(tensor.is_cpu)
-        torch.testing.assert_close(tensor.to("cpu"), host)
+            self.assertEqual(tensor.device.type, "danma")
+            self.assertFalse(tensor.is_cpu)
+            torch.testing.assert_close(tensor.to("cpu"), host)
 
-        stats = privateuse1_stats()
-        self.assertFalse(stats["cpu_fallback"])
-        self.assertGreaterEqual(int(stats["allocations"]), 1)
-        self.assertGreaterEqual(int(stats["copies"]), 2)
+            stats = privateuse1_stats()
+            self.assertFalse(stats["cpu_fallback"])
+            self.assertEqual(stats["storage"], "remote_rust")
+            self.assertEqual(stats["host_payload_bytes"], 0)
+            self.assertGreaterEqual(int(stats["remote_bytes"]), 8)
 
-        # Deliberately unsupported: a generic CPU fallback would make this
-        # succeed. DANMA must fail closed instead.
-        with self.assertRaises((RuntimeError, NotImplementedError)):
-            _ = tensor + tensor
+            # Mul remains deliberately unsupported. If a generic CPU fallback
+            # existed, this would succeed.
+            with self.assertRaises((RuntimeError, NotImplementedError)):
+                _ = tensor * tensor
+        finally:
+            cluster.stop()
 
     def test_danma_forward_has_no_local_fallback_when_rust_node_is_down(self) -> None:
         cluster = SingleNode()
+        enable_privateuse1("127.0.0.1", cluster.port)
         model = DANMALinear(
             cluster.client,
             neuron_ids=(11,),
@@ -112,12 +120,16 @@ class PrivateUse1Tests(unittest.TestCase):
         inputs = torch.tensor([1.0, 2.0], dtype=torch.float32).to("danma:0")
         cluster.stop()
 
-        with self.assertRaises(DANMATransportError):
+        # With remote tensor storage the failure can happen even before the
+        # JSON neuron request: downloading the DANMA input itself requires the
+        # Rust node. Either transport error proves there is no local fallback.
+        with self.assertRaises((DANMATransportError, RuntimeError)):
             model(inputs)
 
     def test_danma_tensor_forward_backward_mutates_remote_rust_neuron(self) -> None:
         cluster = SingleNode()
         try:
+            enable_privateuse1("127.0.0.1", cluster.port)
             model = DANMALinear(
                 cluster.client,
                 neuron_ids=(11,),
@@ -139,8 +151,6 @@ class PrivateUse1Tests(unittest.TestCase):
                 torch.tensor([8.0], dtype=torch.float32),
             )
 
-            # Loss reduction is ordinary PyTorch CPU bookkeeping. The affine
-            # forward/backward itself crosses the DANMA TCP boundary.
             output.to("cpu").sum().backward()
 
             after = cluster.client.inspect(11)
@@ -156,8 +166,6 @@ class PrivateUse1Tests(unittest.TestCase):
                 torch.tensor([2.0, 3.0], dtype=torch.float32),
             )
 
-            # A second inference sees the new Rust-owned parameters, not a
-            # local cached torch.nn.Linear parameter set.
             model.eval()
             with torch.no_grad():
                 updated = model(inputs.detach()).to("cpu")

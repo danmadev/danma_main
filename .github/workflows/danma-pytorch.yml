@@ -47,6 +47,10 @@ jobs:
         env:
           DANMA_NODE_BIN: target/debug/danma-node
         run: python -m unittest discover -s python/tests -p "test_privateuse1.py" -v
+      - name: Prove native DANMA tensor ops and ordinary nn.Linear training
+        env:
+          DANMA_NODE_BIN: target/debug/danma-node
+        run: python -m unittest discover -s python/tests -p "test_native_ops.py" -v
       - name: Run CPU-tensor PyTorch autograd integration tests
         env:
           DANMA_NODE_BIN: target/debug/danma-node
