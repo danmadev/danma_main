@@ -43,7 +43,15 @@ jobs:
         run: cargo build --locked -p danma-net --bin danma-node
       - name: Verify CPU core, shards and TCP contracts
         run: cargo test --locked -p danma-core -p danma-shard -p danma-net --all-targets
-      - name: Run PyTorch autograd, PrivateUse1 and convergence integration tests
+      - name: Prove fail-closed DANMA PrivateUse1 before any autograd engine use
         env:
           DANMA_NODE_BIN: target/debug/danma-node
-        run: python -m unittest discover -s python/tests -v
+        run: python -m unittest discover -s python/tests -p "test_privateuse1.py" -v
+      - name: Run CPU-tensor PyTorch autograd integration tests
+        env:
+          DANMA_NODE_BIN: target/debug/danma-node
+        run: python -m unittest discover -s python/tests -p "test_autograd.py" -v
+      - name: Run multi-epoch convergence benchmark
+        env:
+          DANMA_NODE_BIN: target/debug/danma-node
+        run: python -m unittest discover -s python/tests -p "test_training_convergence.py" -v
