@@ -1,8 +1,9 @@
-"""Autograd bridge for a remote DANMA layer whose weights live on CPU shards.
+"""Autograd bridge for a remote DANMA layer.
 
-The output is a regular torch CPU Tensor with a custom grad_fn. This is
-deliberately NOT a PrivateUse1 tensor, CUDA emulator, torch.compile operator,
-or replacement for arbitrary torch.nn.Linear layers.
+DANMA may be driven either by ordinary CPU tensors or by the fail-closed
+PrivateUse1 device registered as danma. PrivateUse1 storage is host staging
+memory only: affine forward/backward math is performed by remote DANMA neurons,
+never by an ATen CPU linear fallback.
 """
 
 from __future__ import annotations
@@ -17,8 +18,27 @@ from .client import DANMAClient, DANMAError, checked_id
 
 
 def _event_id() -> int:
-    """Random nonzero v1 wire ID. Collisions are improbable, not impossible."""
     return secrets.randbits(64) or 1
+
+
+def _is_danma_device(device: torch.device) -> bool:
+    return device.type in {"danma", "privateuseone"}
+
+
+def _to_host(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.device.type == "cpu":
+        return tensor
+    if _is_danma_device(tensor.device):
+        return tensor.to("cpu")
+    raise ValueError(f"unsupported DANMA tensor device: {tensor.device}")
+
+
+def _from_host(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+    if device.type == "cpu":
+        return tensor
+    if _is_danma_device(device):
+        return tensor.to(device)
+    raise ValueError(f"unsupported DANMA tensor device: {device}")
 
 
 class _RemoteAffine(torch.autograd.Function):
@@ -34,12 +54,9 @@ class _RemoteAffine(torch.autograd.Function):
         route_hops: int,
         training: bool,
     ) -> torch.Tensor:
-        # Torch invokes Function.forward with autograd tracking disabled,
-        # so the caller passes the actual training/inference decision.
-        vector_input = inputs.ndim == 1
-        rows: list[list[float]] = (
-            [inputs.detach().tolist()] if vector_input else inputs.detach().tolist()
-        )
+        host_inputs = _to_host(inputs)
+        vector_input = host_inputs.ndim == 1
+        rows = [host_inputs.detach().tolist()] if vector_input else host_inputs.detach().tolist()
         trace_id = _event_id()
         event_ids: list[list[int]] = []
         result_rows: list[list[float]] = []
@@ -70,10 +87,13 @@ class _RemoteAffine(torch.autograd.Function):
         ctx.feedback_ttl_ms = feedback_ttl_ms
         ctx.route_hops = route_hops
         ctx.vector_input = vector_input
+        ctx.input_device = inputs.device
         ctx.consumed = False
 
-        output = torch.tensor(result_rows, dtype=inputs.dtype, device=inputs.device)
-        return output[0] if vector_input else output
+        host_output = torch.tensor(result_rows, dtype=torch.float32, device="cpu")
+        if vector_input:
+            host_output = host_output[0]
+        return _from_host(host_output, inputs.device)
 
     @staticmethod
     def backward(ctx: object, grad_output: torch.Tensor) -> tuple:
@@ -87,33 +107,31 @@ class _RemoteAffine(torch.autograd.Function):
                 "DANMA inference forward has no saved activation trace; "
                 "call module.train() before a differentiable forward"
             )
+
+        host_gradient = _to_host(grad_output)
         expected_shape = (
             (len(ctx.neuron_ids),)
             if ctx.vector_input
             else (len(ctx.event_ids), len(ctx.neuron_ids))
         )
-        if tuple(grad_output.shape) != expected_shape:
+        if tuple(host_gradient.shape) != expected_shape:
             raise DANMAError("PyTorch backward gradient shape does not match DANMA output")
-        if grad_output.device.type != "cpu" or grad_output.dtype != torch.float32:
-            raise DANMAError("DANMA backward only supports CPU float32 gradients")
-        if not bool(torch.isfinite(grad_output).all().item()):
+        if host_gradient.dtype != torch.float32:
+            raise DANMAError("DANMA backward only supports float32 gradients")
+        if not bool(torch.isfinite(host_gradient).all().item()):
             raise DANMAError("DANMA backward received a non-finite gradient")
 
-        # A partially executed remote backward cannot be rolled back on a
-        # transport error. Do not attempt an automatic replay of this graph.
         ctx.consumed = True
         gradient_rows = (
-            [grad_output.detach().tolist()]
+            [host_gradient.detach().tolist()]
             if ctx.vector_input
-            else grad_output.detach().tolist()
+            else host_gradient.detach().tolist()
         )
         input_gradients: list[list[float]] = []
 
         for events, gradients in zip(ctx.event_ids, gradient_rows):
             accumulated = [0.0] * len(ctx.input_ids)
-            for neuron_id, event_id, gradient in zip(
-                ctx.neuron_ids, events, gradients
-            ):
+            for neuron_id, event_id, gradient in zip(ctx.neuron_ids, events, gradients):
                 contribution = ctx.client.backward(
                     neuron_id=neuron_id,
                     event_id=event_id,
@@ -128,26 +146,15 @@ class _RemoteAffine(torch.autograd.Function):
                 raise DANMAError("accumulated DANMA input gradient is not finite")
             input_gradients.append(accumulated)
 
-        result = torch.tensor(input_gradients, dtype=torch.float32, device="cpu")
+        host_result = torch.tensor(input_gradients, dtype=torch.float32, device="cpu")
         if ctx.vector_input:
-            result = result[0]
-        # Differentiable inputs: x, token. Remote neuron parameters are
-        # intentionally NOT torch.nn.Parameter objects.
+            host_result = host_result[0]
+        result = _from_host(host_result, ctx.input_device)
         return result, None, None, None, None, None, None, None
 
 
 class DANMALinear(torch.nn.Module):
-    """A remotely trained affine layer backed by DANMA neuron IDs.
-
-    Weight and bias state belong exclusively to DANMA. PyTorch's backward
-    sends teacher gradients and yields dLoss/dInput for composition with
-    ordinary PyTorch modules; local optimizers cannot manage remote weights.
-
-    Requires one DANMA neuron per output feature. Every neuron must have an
-    incoming synapse for every input_id, configured on the Rust node. Input
-    IDs must be unused by the cluster so that upstream gradients return
-    as explicit no_route entries. The current Rust CLI initializes bias=0.
-    """
+    """A remotely trained affine layer backed by DANMA neuron IDs."""
 
     def __init__(
         self,
@@ -178,9 +185,6 @@ class DANMALinear(torch.nn.Module):
             raise ValueError("feedback_ttl_ms must be 1..10000")
         if type(route_hops) is not int or not 1 <= route_hops <= 255:
             raise ValueError("route_hops must be 1..255")
-        # danma-node currently sets max_staleness_versions=8; all batch
-        # activations share the forward-time weight version. A ninth prior
-        # update is rejected, so never accept a batch of ten samples.
         if type(max_batch) is not int or not 1 <= max_batch <= 9:
             raise ValueError("max_batch must be 1..9 (remote staleness budget)")
 
@@ -188,10 +192,6 @@ class DANMALinear(torch.nn.Module):
         self.feedback_ttl_ms = feedback_ttl_ms
         self.route_hops = route_hops
         self.max_batch = max_batch
-
-        # This nonpersistent leaf buffer is an autograd trigger even when x
-        # has requires_grad=False: the actual trainable weights live remotely.
-        # It is intentionally not an nn.Parameter/optimizer-owned weight.
         self.register_buffer(
             "_autograd_trigger",
             torch.zeros((), dtype=torch.float32, requires_grad=True),
@@ -201,8 +201,10 @@ class DANMALinear(torch.nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         if not isinstance(inputs, torch.Tensor):
             raise TypeError("DANMALinear requires a torch.Tensor")
-        if inputs.device.type != "cpu" or self._autograd_trigger.device.type != "cpu":
-            raise ValueError("DANMALinear only supports CPU tensors, not GPU tensors")
+        if inputs.device.type != "cpu" and not _is_danma_device(inputs.device):
+            raise ValueError("DANMALinear supports only CPU or DANMA tensors")
+        if self._autograd_trigger.device.type != "cpu":
+            raise ValueError("DANMA autograd trigger must remain on CPU")
         if inputs.dtype != torch.float32:
             raise ValueError("DANMALinear requires float32 inputs")
         if inputs.layout != torch.strided:
@@ -213,14 +215,13 @@ class DANMALinear(torch.nn.Module):
             raise ValueError("DANMALinear input feature dimension mismatch")
         if inputs.ndim == 2 and not 1 <= inputs.shape[0] <= self.max_batch:
             raise ValueError("DANMALinear batch is empty or exceeds max_batch")
-        if not bool(torch.isfinite(inputs).all().item()):
+
+        host_inputs = _to_host(inputs)
+        if not bool(torch.isfinite(host_inputs).all().item()):
             raise ValueError("DANMALinear requires finite input values")
+
         train_remote = bool(self.training and torch.is_grad_enabled())
-        token = (
-            self._autograd_trigger
-            if train_remote
-            else self._autograd_trigger.detach()
-        )
+        token = self._autograd_trigger if train_remote else self._autograd_trigger.detach()
         return _RemoteAffine.apply(
             inputs,
             token,

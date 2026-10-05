@@ -94,21 +94,27 @@ Task: Create a new crate that exposes neuromorph-driver functionality to Python 
 Definition of Done:
 pip install . works.
 Python script can import neuromorph, allocate memory, and launch a dummy kernel.
-3.2 Implement PyTorch PrivateUse1 Dispatch Key
+3.2 Implement PyTorch PrivateUse1 Dispatch Key — MVP DONE (2026-10-05)
 
-Task: Create a C++ extension (using torch::extension) that registers neuromorph as a device using the PrivateUse1 key.
-Definition of Done:
-torch.tensor([1, 2], device='privateuse1') (or mapped name) does not crash.
-The tensor is reported as being on the custom device.
-3.3 Register Allocator with PyTorch (c10::Allocator)
+Implemented for the active DANMA path as a C++ extension registered under
+PrivateUse1 and renamed to `danma`. `torch.device("danma:0")` works and
+DANMA tensors report a non-CPU device. The backend is fail-closed: unsupported
+ATen operators raise instead of silently using CPU kernels. CI verifies
+forward/backward against a real Rust node and proves that stopping the node
+prevents local fallback.
 
-Task: Map neuromorphMalloc/neuromorphFree to PyTorch's allocator interface.
-Definition of Done:
-PyTorch can allocate and free memory on the neuromorph device without memory leaks.
-torch.cuda.memory_allocated() (or equivalent for custom device) reports correct usage.
-3.4 Register Core Operators (aten::mm, aten::add)
+3.3 Register Allocator with PyTorch (c10::Allocator) — MVP PARTIAL
 
-Task: Register the Rust kernels from Phase 1 to PyTorch's dispatcher for specific ATen operators.
-Definition of Done:
-c = torch.mm(a, b) runs on the simulator when a and b are on the neuromorph device.
-Standard PyTorch training loop (Forward -> Loss -> Backward -> Step) runs without error on a simple MLP.
+A PrivateUse1 `c10::Allocator` is registered and currently uses host memory as
+explicit staging storage. CPU <-> DANMA copies, device guard and synchronous
+events are implemented. Device-resident DANMA tensor storage and allocator
+telemetry comparable to CUDA remain future work.
+
+3.4 Register Core Operators (aten::mm, aten::add) — PARTIAL / NEXT
+
+The current supported compute operator is `DANMALinear`: its affine
+forward/backward and local SGD execute on Rust-owned DANMA neuron state through
+the TCP data plane, while PyTorch supplies autograd orchestration and can
+compute the loss on CPU. Generic `aten::mm`, `aten::add` and arbitrary ATen
+coverage are intentionally not registered yet; using such operations directly
+on a DANMA tensor fails closed.

@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "wheel", "torch>=2.8,<3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "danma-torch"
-version = "0.1.0"
-description = "CPU PyTorch autograd bridge to distributed DANMA neurons"
+version = "0.2.0"
+description = "PyTorch autograd and fail-closed PrivateUse1 bridge to distributed DANMA neurons"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["torch>=2.4,<3"]
+dependencies = ["torch>=2.8,<3"]
 
 [tool.setuptools.packages.find]
 where = ["."]
