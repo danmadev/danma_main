@@ -120,7 +120,10 @@ class PrivateUse1Tests(unittest.TestCase):
         inputs = torch.tensor([1.0, 2.0], dtype=torch.float32).to("danma:0")
         cluster.stop()
 
-        with self.assertRaises(DANMATransportError):
+        # With remote tensor storage the failure can happen even before the
+        # JSON neuron request: downloading the DANMA input itself requires the
+        # Rust node. Either transport error proves there is no local fallback.
+        with self.assertRaises((DANMATransportError, RuntimeError)):
             model(inputs)
 
     def test_danma_tensor_forward_backward_mutates_remote_rust_neuron(self) -> None:
