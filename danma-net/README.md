@@ -121,6 +121,9 @@ remaining TTL. For independent remote hosts, clock-skew handling and a
 monotonic per-node activation clock are required. Asynchronous training
 convergence has not been established.
 
-**Framework integration:** no PyTorch PrivateUse1 or TensorFlow PluggableDevice
-is registered. A tensor/shard adapter and numeric correctness benchmarks
-against existing framework operators are the next milestones.
+**Framework integration:** the Python adapter now registers a fail-closed
+PyTorch PrivateUse1 device as `danma:0` for the DANMALinear path. Its storage
+is host staging memory, while affine forward/backward and local SGD go through
+this TCP data plane to Rust-owned neuron state. Unsupported DANMA tensor
+operators fail instead of falling back to ATen CPU. TensorFlow PluggableDevice,
+broad ATen coverage and device-resident tensor storage remain future work.
