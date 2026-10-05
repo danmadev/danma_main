@@ -1,4 +1,5 @@
 #include <ATen/EmptyTensor.h>
+#include <ATen/detail/PrivateUse1HooksInterface.h>
 #include <c10/core/Allocator.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
 #include <c10/core/impl/alloc_cpu.h>
@@ -19,6 +20,52 @@ namespace {
 
 std::atomic<uint64_t> allocation_count{0};
 std::atomic<uint64_t> copy_count{0};
+
+struct DanmaPrivateUse1Hooks final : at::PrivateUse1HooksInterface {
+  bool isBuilt() const override {
+    return true;
+  }
+
+  bool isAvailable() const override {
+    return true;
+  }
+
+  bool hasPrimaryContext(at::DeviceIndex device_index) const override {
+    return device_index == 0;
+  }
+
+  at::DeviceIndex deviceCount() const override {
+    return 1;
+  }
+
+  void setCurrentDevice(at::DeviceIndex device) const override {
+    TORCH_CHECK(device == 0, "DANMA exposes only device index 0");
+  }
+
+  at::DeviceIndex getCurrentDevice() const override {
+    return 0;
+  }
+
+  at::DeviceIndex exchangeDevice(at::DeviceIndex device) const override {
+    TORCH_CHECK(device == 0, "DANMA exposes only device index 0");
+    return 0;
+  }
+
+  at::DeviceIndex maybeExchangeDevice(at::DeviceIndex device) const override {
+    TORCH_CHECK(device == 0 || device == -1, "DANMA exposes only device index 0");
+    return 0;
+  }
+
+  at::Device getDeviceFromPtr(void* data) const override {
+    (void)data;
+    return at::Device(at::DeviceType::PrivateUse1, 0);
+  }
+};
+
+static bool register_hooks [[maybe_unused]] = []() {
+  at::RegisterPrivateUse1HooksInterface(new DanmaPrivateUse1Hooks());
+  return true;
+}();
 
 struct DanmaStagingAllocator final : at::Allocator {
   at::DataPtr allocate(size_t nbytes) override {
