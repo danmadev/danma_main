@@ -3,6 +3,8 @@
 //! This is a trusted *loopback-only* development cluster. Gossip shares route
 //! advertisements; activation and feedback use direct, addressed TCP requests.
 //! Neither gossip nor an acknowledgement provides durable exactly-once effects.
+mod tensor;
+
 use danma_core::{
     derived_event_id, Feedback, FeedbackSource, FeedbackStatus, Forward, ForwardSignal, Neuron,
     SignalStatus, SynapticInput, MAX_AXONS_PER_NEURON, MAX_DENDRITES_PER_NEURON,
@@ -50,24 +52,33 @@ fn elapsed_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-async fn read_frame(stream: &mut TcpStream) -> io::Result<Value> {
+async fn read_frame_bytes(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     let length = stream.read_u32().await? as usize;
     if length == 0 || length > MAX_FRAME_BYTES {
         return Err(invalid("frame exceeds protocol size limit"));
     }
     let mut bytes = vec![0_u8; length];
     stream.read_exact(&mut bytes).await?;
+    Ok(bytes)
+}
+
+async fn write_frame_bytes(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
+    if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES {
+        return Err(invalid("outgoing frame exceeds size limit"));
+    }
+    stream.write_u32(bytes.len() as u32).await?;
+    stream.write_all(bytes).await?;
+    stream.flush().await
+}
+
+async fn read_frame(stream: &mut TcpStream) -> io::Result<Value> {
+    let bytes = read_frame_bytes(stream).await?;
     serde_json::from_slice(&bytes).map_err(|_| invalid("invalid JSON frame"))
 }
 
 async fn write_frame(stream: &mut TcpStream, value: &Value) -> io::Result<()> {
     let encoded = serde_json::to_vec(value).map_err(|_| invalid("cannot serialize response"))?;
-    if encoded.is_empty() || encoded.len() > MAX_FRAME_BYTES {
-        return Err(invalid("outgoing frame exceeds size limit"));
-    }
-    stream.write_u32(encoded.len() as u32).await?;
-    stream.write_all(&encoded).await?;
-    stream.flush().await
+    write_frame_bytes(stream, &encoded).await
 }
 
 /// One request per TCP connection. A timeout is an UNKNOWN delivery outcome,
@@ -225,6 +236,7 @@ struct NodeState {
     shard: Shard,
     peers: BTreeMap<u64, SocketAddr>,
     routes: RwLock<BTreeMap<u64, Route>>,
+    tensors: RwLock<tensor::TensorRuntime>,
 }
 
 impl NodeState {
@@ -784,12 +796,23 @@ fn error_response(code: &str) -> Value {
 }
 
 async fn handle_connection(mut stream: TcpStream, state: Arc<NodeState>) -> io::Result<()> {
-    let incoming = timeout(MAX_IO_WAIT, read_frame(&mut stream))
+    let incoming = timeout(MAX_IO_WAIT, read_frame_bytes(&mut stream))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "frame timed out"))??;
-    let reply = match serde_json::from_value::<Message>(incoming) {
-        Ok(message) => state.process(message).await,
-        Err(_) => error_response("invalid_protocol_message"),
+
+    if tensor::TensorRuntime::is_frame(&incoming) {
+        let reply = state.tensors.write().await.process(&incoming);
+        return timeout(MAX_IO_WAIT, write_frame_bytes(&mut stream, &reply))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "response timed out"))?;
+    }
+
+    let reply = match serde_json::from_slice::<Value>(&incoming)
+        .ok()
+        .and_then(|value| serde_json::from_value::<Message>(value).ok())
+    {
+        Some(message) => state.process(message).await,
+        None => error_response("invalid_protocol_message"),
     };
     timeout(MAX_IO_WAIT, write_frame(&mut stream, &reply))
         .await
@@ -869,6 +892,7 @@ pub async fn serve(config: NodeConfig) -> io::Result<()> {
         shard,
         peers,
         routes: RwLock::new(routes),
+        tensors: RwLock::new(tensor::TensorRuntime::default()),
     });
     let listener = TcpListener::bind(config.address).await?;
     let slots = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
