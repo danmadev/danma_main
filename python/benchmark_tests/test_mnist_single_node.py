@@ -37,6 +37,18 @@ class SingleNodeBenchmarkTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     single.make_layout(hidden)
 
+    def test_node_count_is_configurable(self):
+        for nodes in (1, 2, 4, 10):
+            with self.subTest(nodes=nodes):
+                layout = single.make_layout(1000, nodes)
+                self.assertEqual(layout.nodes, nodes)
+                self.assertEqual(len(layout.partitions), nodes)
+                self.assertEqual(sum(map(len, layout.partitions)), 1010)
+        for nodes in (0, 11, -1, True, 1.5, "4"):
+            with self.subTest(nodes=nodes):
+                with self.assertRaises(ValueError):
+                    single.make_layout(1000, nodes)
+
     def test_default_width_fits_runtime_startup_bounds(self):
         layout = single.make_layout(1000)
         total_weights = layout.inputs * layout.hidden + layout.hidden * layout.outputs
@@ -55,12 +67,13 @@ class SingleNodeBenchmarkTests(unittest.TestCase):
             self.assertEqual(len(data['neurons']), 5)
             base.validate_config(data)
 
-    def test_cpu_only_run_reports_selected_hidden_width(self):
+    def test_cpu_only_run_reports_selected_hidden_width_and_nodes(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             base, 'load_mnist', return_value=self.data()
         ):
             report = single.run_benchmark(
                 hidden_neurons=3,
+                nodes=4,
                 run_dir=Path(directory),
                 backends=('cpu',),
                 train_samples=1,
@@ -70,23 +83,27 @@ class SingleNodeBenchmarkTests(unittest.TestCase):
             )
         self.assertEqual(report['status'], 'ok')
         self.assertEqual(report['model']['hidden_features'], 3)
-        self.assertEqual(report['model']['nodes'], 1)
+        self.assertEqual(report['model']['nodes'], 4)
         self.assertEqual(report['model']['logical_neurons'], 13)
         self.assertEqual(report['model']['parameters'], 2395)
 
-    def test_parser_defaults_to_1000_hidden_and_one_node_contract(self):
+    def test_parser_defaults_and_accepts_nodes_flag(self):
         args = single.parse_args(['--backends', 'cpu', '--no-download'])
-        self.assertEqual(args.hidden_neurons, 1000)
+        self.assertEqual((args.hidden_neurons, args.nodes), (1000, 1))
         layout = single.validate_options(**vars(args))
         self.assertEqual(layout.nodes, 1)
+
+        args = single.parse_args(['--nodes', '4', '--backends', 'cpu', '--no-download'])
+        self.assertEqual(args.nodes, 4)
+        self.assertEqual(single.validate_options(**vars(args)).nodes, 4)
 
 
 @unittest.skipUnless(
     Path(os.environ.get('DANMA_NODE_BIN', 'target/debug/danma-node')).is_file(),
     'real node binary missing',
 )
-class RealSingleNodeBenchmarkTests(unittest.TestCase):
-    def test_small_cpu_and_danma_run_have_numerical_parity(self):
+class RealVariableNodeBenchmarkTests(unittest.TestCase):
+    def test_four_node_cpu_and_danma_run_have_numerical_parity(self):
         train_x = torch.zeros((1, 784), dtype=torch.float32)
         train_y = torch.tensor([0], dtype=torch.int64)
         test_x = torch.ones((1, 784), dtype=torch.float32) * 0.01
@@ -96,6 +113,7 @@ class RealSingleNodeBenchmarkTests(unittest.TestCase):
         ):
             report = single.run_benchmark(
                 hidden_neurons=3,
+                nodes=4,
                 run_dir=Path(directory),
                 node_binary=Path(os.environ.get('DANMA_NODE_BIN', 'target/debug/danma-node')),
                 backends=('cpu', 'danma'),
@@ -105,6 +123,7 @@ class RealSingleNodeBenchmarkTests(unittest.TestCase):
                 download=False,
             )
         self.assertEqual(report['status'], 'ok')
+        self.assertEqual(report['model']['nodes'], 4)
         self.assertTrue(report['comparisons']['danma_vs_cpu']['numerical_parity_passed'])
 
 

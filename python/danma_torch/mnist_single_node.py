@@ -1,7 +1,7 @@
-"""Single-process MNIST 784 -> N -> host ReLU -> 10 DANMA experiment.
+"""Configurable-node MNIST 784 -> N -> host ReLU -> 10 DANMA experiment.
 
-The hidden width is configurable without source changes. The default is 1000
-hidden neurons. One danma-node process owns all hidden and output neurons.
+The hidden width and process count are configurable without source changes.
+Defaults: 1000 hidden neurons and one danma-node process.
 """
 from __future__ import annotations
 
@@ -14,24 +14,27 @@ from . import mnist_benchmark1000 as base
 
 DEFAULT_HIDDEN_NEURONS = 1000
 MAX_HIDDEN_NEURONS = 1024
+MAX_NODES = 10
 
 
-def make_layout(hidden_neurons: int = DEFAULT_HIDDEN_NEURONS) -> base.Layout:
+def make_layout(hidden_neurons: int = DEFAULT_HIDDEN_NEURONS, nodes: int = 1) -> base.Layout:
     if type(hidden_neurons) is not int or not 1 <= hidden_neurons <= MAX_HIDDEN_NEURONS:
         raise ValueError(f'hidden_neurons must be an integer in 1..{MAX_HIDDEN_NEURONS}')
-    return base.Layout(hidden=hidden_neurons, nodes=1)
+    if type(nodes) is not int or not 1 <= nodes <= MAX_NODES:
+        raise ValueError(f'nodes must be an integer in 1..{MAX_NODES}')
+    return base.Layout(hidden=hidden_neurons, nodes=nodes)
 
 
-def validate_options(*, hidden_neurons=DEFAULT_HIDDEN_NEURONS, train_samples=20,
-                     test_samples=10, epochs=1, batch_size=1,
+def validate_options(*, hidden_neurons=DEFAULT_HIDDEN_NEURONS, nodes=1,
+                     train_samples=20, test_samples=10, epochs=1, batch_size=1,
                      backends=('cpu', 'cuda', 'danma'), require_cuda=False, **_):
-    layout = make_layout(hidden_neurons)
+    layout = make_layout(hidden_neurons, nodes)
     base.validate_options(
         train_samples=train_samples,
         test_samples=test_samples,
         epochs=epochs,
         batch_size=batch_size,
-        nodes=1,
+        nodes=nodes,
         backends=backends,
         require_cuda=require_cuda,
         layout=layout,
@@ -39,13 +42,15 @@ def validate_options(*, hidden_neurons=DEFAULT_HIDDEN_NEURONS, train_samples=20,
     return layout
 
 
-def run_benchmark(*, hidden_neurons=DEFAULT_HIDDEN_NEURONS, run_dir=None, json_out=None,
+def run_benchmark(*, hidden_neurons=DEFAULT_HIDDEN_NEURONS, nodes=1,
+                  run_dir=None, json_out=None,
                   node_binary=Path('target/release/danma-node'), data_dir=None,
                   train_samples=20, test_samples=10, epochs=1, batch_size=1, seed=7,
                   backends=('cpu', 'cuda', 'danma'), download=True, require_cuda=False,
                   parity_tolerance=2e-5, tolerance_reason=None):
     layout = validate_options(
         hidden_neurons=hidden_neurons,
+        nodes=nodes,
         train_samples=train_samples,
         test_samples=test_samples,
         epochs=epochs,
@@ -55,7 +60,7 @@ def run_benchmark(*, hidden_neurons=DEFAULT_HIDDEN_NEURONS, run_dir=None, json_o
     )
     if run_dir is None:
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-        run_dir = Path(f'verify-run/mnist-single-node-h{hidden_neurons}') / stamp
+        run_dir = Path(f'verify-run/mnist-n{nodes}-h{hidden_neurons}') / stamp
     root = Path(__file__).parent.parent
     provenance_files = [
         Path(__file__),
@@ -72,7 +77,7 @@ def run_benchmark(*, hidden_neurons=DEFAULT_HIDDEN_NEURONS, run_dir=None, json_o
         epochs=epochs,
         batch_size=batch_size,
         seed=seed,
-        nodes=1,
+        nodes=nodes,
         backends=backends,
         download=download,
         require_cuda=require_cuda,
@@ -86,6 +91,7 @@ def run_benchmark(*, hidden_neurons=DEFAULT_HIDDEN_NEURONS, run_dir=None, json_o
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--hidden-neurons', type=int, default=DEFAULT_HIDDEN_NEURONS)
+    parser.add_argument('--nodes', type=int, default=1)
     parser.add_argument('--node-binary', type=Path, default=Path('target/release/danma-node'))
     parser.add_argument('--data-dir', type=Path, default=Path.home() / '.cache/danma/mnist')
     parser.add_argument('--train-samples', type=int, default=20)
