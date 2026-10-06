@@ -42,7 +42,7 @@ jobs:
       - name: Build real DANMA TCP nodes
         run: cargo build --locked -p danma-net --bin danma-node
       - name: Verify CPU core, shards and TCP contracts
-        run: cargo test --locked -p danma-core -p danma-shard -p danma-net --all-targets
+        run: cargo test --locked -p danma-core -p danma-shard -p danma-runtime -p danma-net --all-targets
       - name: Prove fail-closed DANMA PrivateUse1 before any autograd engine use
         env:
           DANMA_NODE_BIN: target/debug/danma-node

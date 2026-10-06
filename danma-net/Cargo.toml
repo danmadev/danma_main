@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 danma-core = { path = "../danma-core" }
 danma-shard = { path = "../danma-shard" }
+danma-runtime = { path = "../danma-runtime" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
 # Native JSON integers retain the full u64 range. arbitrary_precision exposes
