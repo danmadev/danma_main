@@ -59,3 +59,7 @@ jobs:
         env:
           DANMA_NODE_BIN: target/debug/danma-node
         run: python -m unittest discover -s python/tests -p "test_training_convergence.py" -v
+      - name: Run single-node variable-width MNIST harness tests
+        env:
+          DANMA_NODE_BIN: target/debug/danma-node
+        run: python -m unittest discover -s python/benchmark_tests -p "test_mnist_single_node.py" -v

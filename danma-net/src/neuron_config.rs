@@ -3,9 +3,11 @@ use danma_core::{Activation, Config, Neuron, MAX_DENDRITES_PER_NEURON};
 use serde::{de, Deserialize, Deserializer};
 use std::{collections::BTreeSet, fmt, fs::File, io::Read, marker::PhantomData, path::Path};
 
-pub(crate) const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
-pub(crate) const MAX_NEURONS: usize = 256;
-pub(crate) const MAX_TOTAL_WEIGHTS: usize = 262_144;
+// Bounded startup limits sized to admit the single-node 784 -> 1024 -> 10 experiment.
+// Runtime route-table and per-neuron dendrite bounds remain independent limits.
+pub(crate) const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_NEURONS: usize = 2_048;
+pub(crate) const MAX_TOTAL_WEIGHTS: usize = 1_048_576;
 const MAX_DURATION_MS: u64 = 600_000;
 const MAX_LIVE_EVENTS: usize = 4_096;
 const MAX_STALENESS_VERSIONS: u64 = 8;

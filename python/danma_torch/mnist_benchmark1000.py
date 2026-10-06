@@ -33,6 +33,9 @@ SETTINGS = dict(learning_rate=LR, activation_ttl_ms=120000,
                 replay_retention_ms=10000, max_live_events=4096,
                 max_staleness_versions=8)
 PARAMETER_KEYS = ('w1', 'b1', 'w2', 'b2')
+MAX_CONFIG_BYTES = 64 * 1024 * 1024
+MAX_CONFIG_NEURONS = 2_048
+MAX_CONFIG_TOTAL_WEIGHTS = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -56,8 +59,8 @@ class Layout:
                 checked_id(value, 'layout ID')
         if any(set(a) & set(c) for i, a in enumerate(groups) for c in groups[i + 1:]):
             raise ValueError('neuron IDs and both host alias spaces must be disjoint')
-        if self.hidden + self.outputs < self.nodes or math.ceil((self.hidden + self.outputs) / self.nodes) > 256:
-            raise ValueError('layout must fit nonempty files with at most 256 neurons')
+        if self.hidden + self.outputs < self.nodes or math.ceil((self.hidden + self.outputs) / self.nodes) > MAX_CONFIG_NEURONS:
+            raise ValueError('layout must fit nonempty bounded neuron config files')
 
     @property
     def hidden_ids(self):
@@ -180,7 +183,7 @@ def validate_config(data):
     integer(settings['max_live_events'], 1, 4096)
     integer(settings['max_staleness_versions'], 0, 8)
     neurons = data['neurons']
-    if type(neurons) is not list or not 1 <= len(neurons) <= 256:
+    if type(neurons) is not list or not 1 <= len(neurons) <= MAX_CONFIG_NEURONS:
         raise ValueError('invalid neuron count')
     ids, total = set(), 0
     for neuron in neurons:
@@ -204,7 +207,7 @@ def validate_config(data):
             sources.add(weight['source'])
             number(weight['weight'])
         total += len(weights)
-    if total > 262144:
+    if total > MAX_CONFIG_TOTAL_WEIGHTS:
         raise ValueError('too many total weights')
 
 
@@ -227,8 +230,8 @@ def write_configs(directory, layout, initial):
         data = dict(schema_version=1, settings=SETTINGS.copy(), neurons=[specs[n] for n in ids])
         validate_config(data)
         encoded = json.dumps(data, allow_nan=False, separators=(',', ':')).encode()
-        if len(encoded) > 16 * 1024 * 1024:
-            raise ValueError('configuration exceeds 16 MiB')
+        if len(encoded) > MAX_CONFIG_BYTES:
+            raise ValueError(f'configuration exceeds {MAX_CONFIG_BYTES} bytes')
         path = directory / f'node-{index + 1}.json'
         with path.open('xb') as stream:
             stream.write(encoded)
@@ -376,13 +379,22 @@ class Cluster:
 
 
 def validate_options(*, train_samples=20, test_samples=10, epochs=1, batch_size=1,
-                     nodes=10, backends=('cpu', 'cuda', 'danma'), require_cuda=False, **_):
+                     nodes=10, backends=('cpu', 'cuda', 'danma'), require_cuda=False,
+                     layout=None, **_):
     if any(type(n) is not int or n <= 0 for n in (train_samples, test_samples, epochs)):
         raise ValueError('train_samples, test_samples and epochs must be positive integers')
     if type(batch_size) is not int or batch_size != 1:
         raise ValueError('batch_size must be 1: multilayer batch update fairness is not proven')
-    if type(nodes) is not int or nodes != 10:
-        raise ValueError('public benchmark requires exactly 10 nodes')
+    if layout is None:
+        if type(nodes) is not int or nodes != 10:
+            raise ValueError('public benchmark requires exactly 10 nodes')
+    else:
+        if not isinstance(layout, Layout):
+            raise ValueError('layout must be a Layout instance')
+        if type(nodes) is not int or nodes != layout.nodes:
+            raise ValueError('nodes must match supplied layout')
+        if (layout.inputs, layout.outputs) != (784, 10):
+            raise ValueError('MNIST benchmark requires 784 inputs and 10 outputs')
     if not backends or len(set(backends)) != len(backends) or set(backends) - {'cpu', 'cuda', 'danma'}:
         raise ValueError('backends must be a nonempty unique list of cpu,cuda,danma')
     if require_cuda and 'cuda' not in backends:
@@ -542,7 +554,7 @@ def train_and_measure(model, initial, dataset, orders, device, metrics, *, check
 
 
 def run_remote(context, metrics, *, checkpoint):
-    layout = Layout()
+    layout = context.get('layout') or Layout()
     cluster = Cluster(context['node_binary'], context['run_dir'], layout, context['initial'])
     metrics['logical_requests'] = cluster.counts
     metrics['runtime_timings'] = cluster.timings
@@ -587,7 +599,7 @@ def run_remote(context, metrics, *, checkpoint):
         checkpoint()
 
 
-def source_provenance(run_dir, binary):
+def source_provenance(run_dir, binary, extra_files=()):
     def git(*args):
         return subprocess.check_output(['git', *args], stderr=subprocess.STDOUT)
     result = {}
@@ -604,6 +616,10 @@ def source_provenance(run_dir, binary):
     files = [Path(__file__), Path(__file__).with_name('layer.py'), Path(__file__).with_name('client.py'), Path(__file__).with_name('mnist_benchmark.py'),
              Path(__file__).parent.parent / 'MNIST_BENCHMARK1000.md',
              Path(__file__).parent.parent / 'benchmark_tests/test_mnist_benchmark1000.py']
+    for extra in extra_files:
+        path = Path(extra)
+        if path not in files:
+            files.append(path)
     result['source_sha256'] = {}
     snapshot_dir = run_dir / 'source-snapshot'
     snapshot_dir.mkdir()
@@ -643,9 +659,12 @@ def comparisons(results, states, tolerance):
 def run_benchmark(*, run_dir=None, json_out=None, node_binary=Path('target/release/danma-node'),
                   data_dir=None, train_samples=20, test_samples=10,
                   epochs=1, batch_size=1, seed=7, nodes=10, backends=('cpu', 'cuda', 'danma'),
-                  download=True, require_cuda=False, parity_tolerance=2e-5, tolerance_reason=None):
+                  download=True, require_cuda=False, parity_tolerance=2e-5, tolerance_reason=None,
+                  layout=None, provenance_files=()):
     validate_options(train_samples=train_samples, test_samples=test_samples, epochs=epochs,
-                     batch_size=batch_size, nodes=nodes, backends=backends, require_cuda=require_cuda)
+                     batch_size=batch_size, nodes=nodes, backends=backends, require_cuda=require_cuda,
+                     layout=layout)
+    layout = layout or Layout()
     if not math.isfinite(parity_tolerance) or parity_tolerance <= 0:
         raise ValueError('parity tolerance must be finite and positive')
     if parity_tolerance != 2e-5 and not tolerance_reason:
@@ -656,15 +675,21 @@ def run_benchmark(*, run_dir=None, json_out=None, node_binary=Path('target/relea
     if (run_dir / 'report.json').exists():
         raise FileExistsError('run_dir already contains a report; choose a fresh run directory')
     node_binary = Path(node_binary)
-    report: dict[str, Any] = dict(benchmark='mnist-784-1000-relu-10', schema_version=1, status='running', exit_code=1,
+    partition_sizes = [len(ids) for ids in layout.partitions]
+    neurons_per_process = partition_sizes[0] if len(set(partition_sizes)) == 1 else partition_sizes
+    parameter_count = (layout.inputs + 1) * layout.hidden + (layout.hidden + 1) * layout.outputs
+    report: dict[str, Any] = dict(benchmark=f'mnist-{layout.inputs}-{layout.hidden}-relu-{layout.outputs}', schema_version=1, status='running', exit_code=1,
         run_dir=str(run_dir), requested_backends=list(backends),
-        model=dict(input_features=784, hidden_features=1000, output_features=10, logical_neurons=1010,
-                   parameters=795010, nodes=10, neurons_per_process=101, workers_per_process=2,
+        model=dict(input_features=layout.inputs, hidden_features=layout.hidden, output_features=layout.outputs,
+                   logical_neurons=len(layout.neuron_ids), parameters=parameter_count, nodes=layout.nodes,
+                   neurons_per_process=neurons_per_process, workers_per_process=2,
                    initialization='seeded CPU float32 uniform +/-1/sqrt(fan_in), zero biases',
                    optimizer='per-example SGD', learning_rate=LR, momentum=0, weight_decay=0,
                    loss='cross_entropy', precision='float32, no AMP, IEEE CUDA matmul'),
         hybrid_boundary=dict(remote='both affine forward/backward/SGD updates', host='ReLU, cross entropy, autograd aggregation',
-                             input_aliases=[20001, 20784], feature_aliases=[30001, 31000], all_remote_activations='linear', local_affine_fallback=False),
+                             input_aliases=[layout.input_ids[0], layout.input_ids[-1]],
+                             feature_aliases=[layout.feature_ids[0], layout.feature_ids[-1]],
+                             all_remote_activations='linear', local_affine_fallback=False),
         training=dict(epochs=epochs, batch_size=1, seed=seed, order_seed=seed + 2),
         quality_criteria=dict(parameter_atol=parity_tolerance, parameter_rtol=parity_tolerance,
                               loss_atol=parity_tolerance, loss_rtol=parity_tolerance,
@@ -696,7 +721,7 @@ def run_benchmark(*, run_dir=None, json_out=None, node_binary=Path('target/relea
     states = {}
     checkpoint()
     try:
-        report['provenance'] = source_provenance(run_dir, node_binary)
+        report['provenance'] = source_provenance(run_dir, node_binary, provenance_files)
         progress('load shared balanced MNIST subsets')
         before = time.perf_counter()
         dataset = load_mnist(Path(data_dir) if data_dir else Path.home() / '.cache/danma/mnist',
@@ -714,12 +739,12 @@ def run_benchmark(*, run_dir=None, json_out=None, node_binary=Path('target/relea
         if min(train_samples, test_samples) < 10:
             report['dataset']['warning'] = 'less than ten samples omits classes; smoke proves execution only'
             progress(report['dataset']['warning'])
-        initial = shared_initialization(seed)
+        initial = shared_initialization(seed, layout)
         report['initialization_sha256'] = tensor_digest(initial)
         torch.save(initial, run_dir / 'initial-state.pt')
         orders = _orders(train_samples, epochs, seed + 2)
         report['training']['order_sha256'] = tensor_digest(orders)
-        context = dict(run_dir=run_dir, node_binary=node_binary, initial=initial, dataset=dataset, orders=orders)
+        context = dict(run_dir=run_dir, node_binary=node_binary, initial=initial, dataset=dataset, orders=orders, layout=layout)
         checkpoint()
         for name in backends:
             metrics = report['results'][name]
