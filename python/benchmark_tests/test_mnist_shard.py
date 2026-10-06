@@ -33,6 +33,14 @@ class ShardMNISTUnitTests(unittest.TestCase):
         self.assertIsInstance(model.hidden, DANMAShardLinear)
         self.assertIsInstance(model.output, DANMAShardLinear)
 
+    def test_cli_rejects_node_abbreviation_and_multinode_v1(self):
+        with self.assertRaises(SystemExit):
+            mnist_shard.parse_args(["--node", "4"])
+        with self.assertRaises(SystemExit):
+            mnist_shard.parse_args(["--nodes", "4"])
+        args = mnist_shard.parse_args(["--nodes", "1", "--backends", "cpu"])
+        self.assertEqual(args.nodes, 1)
+
     def test_cpu_only_wrapper_reports_executor_contract(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             base, "load_mnist", return_value=self.data()
