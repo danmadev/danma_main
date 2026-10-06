@@ -27,9 +27,7 @@ class ShardMNISTUnitTests(unittest.TestCase):
         self.assertEqual(len(layout.output_ids), 10)
 
     def test_remote_model_uses_shard_layers(self):
-        client = mock.Mock(spec=base.DANMAClient)
-        # Constructor checks exact DANMAClient type through the inherited layer.
-        client.__class__ = base.DANMAClient
+        client = base.DANMAClient("127.0.0.1", 1)
         layout = mnist_shard.make_layout(3)
         model = mnist_shard.ShardRemoteModel(client, layout)
         self.assertIsInstance(model.hidden, DANMAShardLinear)
