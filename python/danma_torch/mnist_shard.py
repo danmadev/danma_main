@@ -80,7 +80,10 @@ def run_benchmark(
     require_cuda=False,
     parity_tolerance=2e-5,
     tolerance_reason=None,
+    nodes=1,
 ):
+    if nodes != 1:
+        raise ValueError("async local shard v1 requires exactly one node")
     if batch_size != 1:
         raise ValueError("shard MNIST v1 keeps per-example SGD; batch_size must be 1")
     layout = make_layout(hidden_neurons)
@@ -133,9 +136,11 @@ def run_benchmark(
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--hidden-neurons", type=int, default=DEFAULT_HIDDEN_NEURONS)
     parser.add_argument("--node-binary", type=Path, default=Path("target/release/danma-node"))
+    parser.add_argument("--nodes", type=int, choices=[1], default=1,
+                        help="v1 local shard executor supports exactly one node")
     parser.add_argument("--data-dir", type=Path, default=Path.home() / ".cache/danma/mnist")
     parser.add_argument("--train-samples", type=int, default=20)
     parser.add_argument("--test-samples", type=int, default=10)
