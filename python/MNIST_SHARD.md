@@ -105,6 +105,23 @@ PYTHONPATH=python python -m danma_torch.mnist_shard \
   --smoke
 ```
 
+## Dataset sizing
+
+The sampler returns the exact requested number of rows. For subsets it stays
+as class-balanced as the source split permits. The canonical MNIST test split
+itself is not perfectly class-balanced, so `--test-samples 10000` uses all
+10,000 test examples and reports the actual per-class counts.
+
+The v1 shard executor is local-only:
+
+```text
+--nodes 1
+```
+
+Multi-node shard fan-out is intentionally a separate experiment. CLI option
+abbreviation is disabled so a typo such as `--node 4` cannot silently
+overwrite `--node-binary`.
+
 ## 1000-neuron comparison
 
 ```bash
