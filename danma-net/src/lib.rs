@@ -1027,13 +1027,23 @@ impl NodeState {
                     match by_target.remove(&item.target) {
                         Some(Ok(FeedbackStatus::Applied { upstream, version })) => {
                             let mut valid_upstream = upstream.len() == input_ids.len();
+                            let mut seen_inputs = BTreeMap::new();
                             for dispatch in upstream {
                                 if let Some(index) = input_positions.get(&dispatch.target_neuron_id) {
-                                    accumulated[*index] += dispatch.feedback.gradient;
+                                    if seen_inputs
+                                        .insert(dispatch.target_neuron_id, ())
+                                        .is_some()
+                                    {
+                                        valid_upstream = false;
+                                    } else {
+                                        accumulated[*index] += dispatch.feedback.gradient;
+                                    }
                                 } else {
                                     valid_upstream = false;
                                 }
                             }
+                            valid_upstream =
+                                valid_upstream && seen_inputs.len() == input_ids.len();
                             if valid_upstream {
                                 results.push(json!({
                                     "target":item.target,
