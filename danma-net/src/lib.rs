@@ -1,8 +1,10 @@
-//! Bounded TCP transport for the DANMA CPU-first prototype.
+//! Process-boundary transport for the DANMA CPU-first prototype.
 //!
-//! This is a trusted *loopback-only* development cluster. Gossip shares route
-//! advertisements; activation and feedback use direct, addressed TCP requests.
-//! Neither gossip nor an acknowledgement provides durable exactly-once effects.
+//! Same-process neuron cascades are executed by danma-runtime through bounded
+//! Rust mailboxes; they never recurse through TCP/JSON. This gateway is used
+//! only when work crosses a process boundary. Gossip remains control-plane
+//! discovery. Neither gossip nor an acknowledgement provides durable
+//! exactly-once effects.
 mod tensor;
 
 use danma_core::{
@@ -333,18 +335,22 @@ impl NodeState {
             )
             .await;
 
-        let mut terminals = local
-            .terminals
-            .into_iter()
-            .map(|terminal| {
-                json!({
+        let mut terminals = Vec::new();
+        let mut unrouted = Vec::new();
+        for terminal in local.terminals {
+            match u64::try_from(terminal.event_id) {
+                Ok(event_id) => terminals.push(json!({
                     "neuron":terminal.neuron_id,
-                    "event_id":terminal.event_id.to_string(),
+                    "event_id":event_id,
                     "output":terminal.output
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut unrouted = local
+                })),
+                Err(_) => unrouted.push(json!({
+                    "target":terminal.neuron_id,
+                    "reason":"terminal_event_id_out_of_range"
+                })),
+            }
+        }
+        unrouted.extend(local
             .failures
             .into_iter()
             .map(|failure| {
@@ -362,7 +368,7 @@ impl NodeState {
                     "detail":format!("{:?}", failure.kind)
                 })
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>());
 
         for remote in local.remote {
             let event_id = match u64::try_from(remote.event_id) {
