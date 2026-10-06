@@ -8,3 +8,6 @@ license = "MIT"
 [dependencies]
 danma-core = { path = "../danma-core" }
 danma-shard = { path = "../danma-shard" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
