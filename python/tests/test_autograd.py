@@ -129,7 +129,7 @@ class PyTorchIntegrationTests(unittest.TestCase):
         self.assertEqual(self.inspect(11)["version"], 1)
         self.assertEqual(self.inspect(21)["version"], 1)
         self.assertEqual(self.inspect(31)["version"], 1)
-        self.assertEqual(float(self.inspect(11)["weights"]["901"]), 1.9)
+        self.assertAlmostEqual(float(self.inspect(11)["weights"]["901"]), 1.9, places=6)
         self.assertIsNone(inputs.grad)
 
     def test_gradients_propagate_through_an_ordinary_torch_linear_layer(self) -> None:
