@@ -89,6 +89,40 @@ class RealShardMNISTTests(unittest.TestCase):
         self.assertTrue(versions["all_expected"])
         self.assertEqual(versions["expected"], 1)
 
+    def test_1000_hidden_one_sample_uses_four_train_shard_requests(self):
+        train_x = torch.zeros((1, 784), dtype=torch.float32)
+        train_y = torch.tensor([0], dtype=torch.int64)
+        test_x = torch.ones((1, 784), dtype=torch.float32) * 0.01
+        test_y = torch.tensor([0], dtype=torch.int64)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            base,
+            "load_mnist",
+            return_value=(train_x, train_y, test_x, test_y),
+        ):
+            report = mnist_shard.run_benchmark(
+                hidden_neurons=1000,
+                run_dir=Path(directory),
+                node_binary=Path(
+                    os.environ.get("DANMA_NODE_BIN", "target/debug/danma-node")
+                ),
+                backends=("cpu", "danma"),
+                train_samples=1,
+                test_samples=1,
+                epochs=1,
+                download=False,
+            )
+        self.assertEqual(report["status"], "ok")
+        comparison = report["comparisons"]["danma_vs_cpu"]
+        self.assertTrue(comparison["numerical_parity_passed"])
+        self.assertLessEqual(comparison["max_parameter_error"], 2e-5)
+        requests = report["results"]["danma"]["logical_requests"]
+        self.assertEqual(requests.get("train:forward_shard"), 2)
+        self.assertEqual(requests.get("train:backward_shard"), 2)
+        version_checks = report["results"]["danma"]["version_checks"]
+        self.assertTrue(all(item["all_expected"] for item in version_checks))
+        self.assertEqual(version_checks[-1]["count"], 1010)
+        self.assertEqual(version_checks[-1]["expected"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
