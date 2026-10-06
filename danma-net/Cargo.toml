@@ -14,4 +14,7 @@ danma-core = { path = "../danma-core" }
 danma-shard = { path = "../danma-shard" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+# Native JSON integers retain the full u64 range. arbitrary_precision exposes
+# some floats as private maps that Serde's internally tagged enum buffer rejects.
+# Accurate f64 parsing also keeps valid f32 boundary literals inside their range.
+serde_json = { version = "1", features = ["float_roundtrip"] }

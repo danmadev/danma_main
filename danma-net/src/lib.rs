@@ -104,14 +104,15 @@ pub struct Advert {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Source {
-    Teacher,
+    // Empty struct variants enforce deny_unknown_fields; unit variants do not.
+    Teacher {},
     Neuron { neuron_id: u64, event_id: u64 },
 }
 
 impl From<Source> for FeedbackSource {
     fn from(source: Source) -> Self {
         match source {
-            Source::Teacher => FeedbackSource::Teacher,
+            Source::Teacher {} => FeedbackSource::Teacher,
             Source::Neuron {
                 neuron_id,
                 event_id,
@@ -128,7 +129,7 @@ impl TryFrom<FeedbackSource> for Source {
 
     fn try_from(source: FeedbackSource) -> io::Result<Self> {
         Ok(match source {
-            FeedbackSource::Teacher => Self::Teacher,
+            FeedbackSource::Teacher => Self::Teacher {},
             FeedbackSource::Neuron {
                 neuron_id,
                 event_id,
@@ -146,7 +147,20 @@ impl TryFrom<FeedbackSource> for Source {
 struct Input {
     from: u64,
     source_event_id: u64,
+    #[serde(deserialize_with = "deserialize_finite_f32")]
     value: f32,
+}
+
+fn deserialize_finite_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    // Check before narrowing: values just beyond f32::MAX can round down to it.
+    if !value.is_finite() || value.abs() > f64::from(f32::MAX) {
+        return Err(serde::de::Error::custom("expected a finite f32"));
+    }
+    Ok(value as f32)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,7 +170,8 @@ enum Message {
         from_node: u64,
         routes: Vec<Advert>,
     },
-    Routes,
+    // Unlike a unit variant, an empty struct enforces deny_unknown_fields.
+    Routes {},
     Inspect {
         target: u64,
         route_hops: u8,
@@ -183,6 +198,7 @@ enum Message {
         edge_id: u64,
         from: u64,
         source_event_id: u64,
+        #[serde(deserialize_with = "deserialize_finite_f32")]
         value: f32,
         training: bool,
         forward_hops: u8,
@@ -192,6 +208,7 @@ enum Message {
         target: u64,
         event_id: u64,
         from: Source,
+        #[serde(deserialize_with = "deserialize_finite_f32")]
         gradient: f32,
         ttl_ms: u64,
         gradient_hops: u8,
@@ -337,7 +354,7 @@ impl NodeState {
 
     async fn process(&self, msg: Message) -> Value {
         match msg {
-            Message::Routes => {
+            Message::Routes {} => {
                 let routes: BTreeMap<_, _> = self
                     .routes
                     .read()
@@ -795,6 +812,11 @@ fn error_response(code: &str) -> Value {
     json!({"kind":"error","code":code})
 }
 
+fn decode_message(incoming: &[u8]) -> Result<Message, serde_json::Error> {
+    let value = serde_json::from_slice::<Value>(incoming)?;
+    serde_json::from_value(value)
+}
+
 async fn handle_connection(mut stream: TcpStream, state: Arc<NodeState>) -> io::Result<()> {
     let incoming = timeout(MAX_IO_WAIT, read_frame_bytes(&mut stream))
         .await
@@ -807,12 +829,9 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<NodeState>) -> io::
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "response timed out"))?;
     }
 
-    let reply = match serde_json::from_slice::<Value>(&incoming)
-        .ok()
-        .and_then(|value| serde_json::from_value::<Message>(value).ok())
-    {
-        Some(message) => state.process(message).await,
-        None => error_response("invalid_protocol_message"),
+    let reply = match decode_message(&incoming) {
+        Ok(message) => state.process(message).await,
+        Err(_) => error_response("invalid_protocol_message"),
     };
     timeout(MAX_IO_WAIT, write_frame(&mut stream, &reply))
         .await
@@ -916,3 +935,6 @@ pub async fn serve(config: NodeConfig) -> io::Result<()> {
 fn is_loopback(ip: IpAddr) -> bool {
     ip.is_loopback()
 }
+
+#[cfg(test)]
+mod protocol_tests;

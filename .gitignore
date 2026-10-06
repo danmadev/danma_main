@@ -21,3 +21,5 @@ Cargo.lock
 #.idea//target
 python/danma_torch/__pycache__/
 verify-run/venv/
+python/tests/
+verify-run/
