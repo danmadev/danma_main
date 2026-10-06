@@ -739,9 +739,21 @@ def run_benchmark(*, run_dir=None, json_out=None, node_binary=Path('target/relea
                 raise ValueError('MNIST loader returned invalid shape/dtype')
             if bool(((y < 0) | (y >= 10)).any()):
                 raise ValueError('MNIST labels must be 0..9')
-        report['dataset'] = dict(train_samples=train_samples, test_samples=test_samples, balanced_subset=True,
-            data_seconds=time.perf_counter() - before, sha256=tensor_digest(dataset),
-            train_class_counts=torch.bincount(dataset[1], minlength=10).tolist(), test_class_counts=torch.bincount(dataset[3], minlength=10).tolist())
+        train_counts = torch.bincount(dataset[1], minlength=10).tolist()
+        test_counts = torch.bincount(dataset[3], minlength=10).tolist()
+        report['dataset'] = dict(
+            train_samples=train_samples,
+            test_samples=test_samples,
+            stratified_subset=True,
+            balanced_subset=(max(train_counts) - min(train_counts) <= 1
+                             and max(test_counts) - min(test_counts) <= 1),
+            train_balanced=max(train_counts) - min(train_counts) <= 1,
+            test_balanced=max(test_counts) - min(test_counts) <= 1,
+            data_seconds=time.perf_counter() - before,
+            sha256=tensor_digest(dataset),
+            train_class_counts=train_counts,
+            test_class_counts=test_counts,
+        )
         if min(train_samples, test_samples) < 10:
             report['dataset']['warning'] = 'less than ten samples omits classes; smoke proves execution only'
             progress(report['dataset']['warning'])
