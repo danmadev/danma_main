@@ -1,0 +1,10 @@
+[package]
+name = "danma-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Rust-native local data plane and shard placement primitives for DANMA"
+license = "MIT"
+
+[dependencies]
+danma-core = { path = "../danma-core" }
+danma-shard = { path = "../danma-shard" }
