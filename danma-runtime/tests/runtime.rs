@@ -3,7 +3,7 @@ use danma_core::{
     Neuron, SynapticInput,
 };
 use danma_runtime::{
-    AddressSpace, LocalDataPlane, LocalLimits, NodeId, PlacementAdvert, PlacementDirectory,
+    AddressSpace, FiredActivation, LocalDataPlane, LocalLimits, NodeId, PlacementAdvert, PlacementDirectory,
     PlacementEpoch, PlacementError, ShardId, MAX_LOGICAL_NEURONS,
 };
 use danma_shard::Shard;
@@ -153,7 +153,17 @@ async fn forward_chain_stays_in_process_until_a_real_boundary() {
         .unwrap();
 
     let cascade = runtime
-        .cascade_forward(1, 10, 77, start.output, false, 8, &start.axons)
+        .cascade_forward(
+            FiredActivation {
+                source: 1,
+                source_event_id: 10,
+                trace_id: 77,
+                output: start.output,
+                training: false,
+                forward_hops: 8,
+            },
+            &start.axons,
+        )
         .await;
     assert_eq!(start.output, 2.0);
     assert_eq!(cascade.local_deliveries, 2);
@@ -203,7 +213,17 @@ async fn only_cross_process_forward_work_becomes_typed_egress() {
         .unwrap();
 
     let cascade = runtime
-        .cascade_forward(1, 10, 77, start.output, false, 8, &start.axons)
+        .cascade_forward(
+            FiredActivation {
+                source: 1,
+                source_event_id: 10,
+                trace_id: 77,
+                output: start.output,
+                training: false,
+                forward_hops: 8,
+            },
+            &start.axons,
+        )
         .await;
     assert_eq!(cascade.local_deliveries, 1);
     assert_eq!(cascade.terminals.len(), 1);
@@ -245,7 +265,17 @@ async fn backward_feedback_walks_local_chain_without_network_and_updates_once() 
         .await
         .unwrap();
     let forward = runtime
-        .cascade_forward(1, 10, trace_id, start.output, true, 8, &start.axons)
+        .cascade_forward(
+            FiredActivation {
+                source: 1,
+                source_event_id: 10,
+                trace_id,
+                output: start.output,
+                training: true,
+                forward_hops: 8,
+            },
+            &start.axons,
+        )
         .await;
     assert!(forward.failures.is_empty());
     assert_eq!(forward.terminals[0].event_id, event_3);
@@ -312,12 +342,14 @@ async fn local_delivery_budget_bounds_cycles_and_bad_topologies() {
 
     let cascade = runtime
         .cascade_forward(
-            1,
-            10,
-            77,
-            1.0,
-            false,
-            8,
+            FiredActivation {
+                source: 1,
+                source_event_id: 10,
+                trace_id: 77,
+                output: 1.0,
+                training: false,
+                forward_hops: 8,
+            },
             &[Axon { edge_id: 12, to: 2 }],
         )
         .await;
