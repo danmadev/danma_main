@@ -46,7 +46,7 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(len(neurons), 101)
                 self.assertEqual(sorted(sum(n['id'] % 2 == w for n in neurons) for w in (0, 1)), [50, 51])
                 self.assertLess(p.stat().st_size, 16 * 1024 * 1024)
-                self.assertLessEqual(sum(len(n['weights']) for n in neurons), 262144)
+                self.assertLessEqual(sum(len(n['weights']) for n in neurons), b.MAX_CONFIG_TOTAL_WEIGHTS)
                 for n in neurons:
                     self.assertEqual(n['activation'], 'linear')
                     recovered[n['id']] = n

@@ -160,8 +160,8 @@ The reader consumes at most limit+1 bytes and does not trust file metadata.
 JSON parsing is directly into strict typed structs with bounded array visitors;
 it rejects excess array elements without storing them and retains the parser's
 normal nesting limit. The byte buffer, parsed vectors and core weight maps
-still incur bounded memory/CPU costs; 16 MiB is an input cap, **not** a promise
-that total startup memory is 16 MiB. The whole document is validated before
+still incur bounded memory/CPU costs; 64 MiB is an input cap, **not** a promise
+that total startup memory is 64 MiB. The whole document is validated before
 core construction, shard workers or the TCP listener. Failure exits nonzero;
 there is no fallback to legacy flags. This is startup-only loading, not reload
 or checkpoint support.
