@@ -11,7 +11,9 @@ use danma_core::{
     derived_event_id, Feedback, FeedbackSource, FeedbackStatus, Forward, ForwardSignal, Neuron, SignalStatus,
     SynapticInput, MAX_AXONS_PER_NEURON, MAX_DENDRITES_PER_NEURON,
 };
-use danma_runtime::{BackwardFailureKind, ForwardFailureKind, LocalDataPlane, LocalLimits};
+use danma_runtime::{
+    BackwardFailureKind, FiredActivation, ForwardFailureKind, LocalDataPlane, LocalLimits,
+};
 use danma_shard::Shard;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -325,12 +327,14 @@ impl NodeState {
         let local = self
             .local
             .cascade_forward(
-                emission.source,
-                u128::from(emission.source_event_id),
-                u128::from(emission.trace_id),
-                emission.output,
-                emission.training,
-                emission.forward_hops,
+                FiredActivation {
+                    source: emission.source,
+                    source_event_id: u128::from(emission.source_event_id),
+                    trace_id: u128::from(emission.trace_id),
+                    output: emission.output,
+                    training: emission.training,
+                    forward_hops: emission.forward_hops,
+                },
                 axons,
             )
             .await;
