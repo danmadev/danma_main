@@ -274,6 +274,16 @@ impl LocalLimits {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FiredActivation {
+    pub source: NeuronId,
+    pub source_event_id: EventId,
+    pub trace_id: TraceId,
+    pub output: f32,
+    pub training: bool,
+    pub forward_hops: u8,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteForward {
     pub target: NeuronId,
@@ -412,20 +422,15 @@ impl LocalDataPlane {
     /// were configured too generously.
     pub async fn cascade_forward(
         &self,
-        source: NeuronId,
-        source_event_id: EventId,
-        trace_id: TraceId,
-        output: f32,
-        training: bool,
-        forward_hops: u8,
+        fired: FiredActivation,
         axons: &[Axon],
     ) -> ForwardCascade {
         let mut result = ForwardCascade::default();
         if axons.is_empty() {
             result.terminals.push(TerminalActivation {
-                neuron_id: source,
-                event_id: source_event_id,
-                output,
+                neuron_id: fired.source,
+                event_id: fired.source_event_id,
+                output: fired.output,
             });
             return result;
         }
@@ -433,12 +438,12 @@ impl LocalDataPlane {
         let mut queue = VecDeque::new();
         for axon in axons {
             queue.push_back(ForwardWork {
-                source,
-                source_event_id,
-                trace_id,
-                value: output,
-                training,
-                remaining_hops: forward_hops,
+                source: fired.source,
+                source_event_id: fired.source_event_id,
+                trace_id: fired.trace_id,
+                value: fired.output,
+                training: fired.training,
+                remaining_hops: fired.forward_hops,
                 axon: *axon,
             });
         }
