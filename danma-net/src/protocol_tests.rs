@@ -273,3 +273,44 @@ fn numeric_protocol_integer_fidelity_and_rejection() {
         }
     }
 }
+
+
+#[test]
+fn shard_protocol_decodes_independent_event_ids_and_finite_values() {
+    let forward = br#"{"kind":"forward_shard","targets":[{"target":11,"event_id":101},{"target":12,"event_id":102}],"trace_id":77,"inputs":[{"from":99,"value":1.25e-1}],"training":true}"#;
+    match decode_message(forward).unwrap() {
+        Message::ForwardShard { targets, trace_id, inputs, training, .. } => {
+            assert_eq!(targets.len(), 2);
+            assert_eq!(targets[0].target, 11);
+            assert_eq!(targets[1].event_id, 102);
+            assert_eq!(trace_id, 77);
+            assert_eq!(inputs[0].value.to_bits(), 0.125_f32.to_bits());
+            assert!(training);
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+
+    let backward = br#"{"kind":"backward_shard","targets":[{"target":11,"event_id":101,"gradient":-2.5e-1},{"target":12,"event_id":102,"gradient":0.5}],"input_ids":[99],"ttl_ms":3000,"gradient_hops":2}"#;
+    match decode_message(backward).unwrap() {
+        Message::BackwardShard { targets, input_ids, ttl_ms, gradient_hops } => {
+            assert_eq!(targets.len(), 2);
+            assert_eq!(targets[0].gradient.to_bits(), (-0.25_f32).to_bits());
+            assert_eq!(input_ids, vec![99]);
+            assert_eq!(ttl_ms, 3000);
+            assert_eq!(gradient_hops, 2);
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+}
+
+#[test]
+fn shard_protocol_rejects_unknown_fields_and_nonfinite_gradients() {
+    assert!(decode_message(
+        br#"{"kind":"forward_shard","targets":[{"target":11,"event_id":101,"extra":1}],"trace_id":77,"inputs":[{"from":99,"value":1}],"training":true}"#
+    )
+    .is_err());
+    assert!(decode_message(
+        br#"{"kind":"backward_shard","targets":[{"target":11,"event_id":101,"gradient":1e400}],"input_ids":[99],"ttl_ms":3000,"gradient_hops":2}"#
+    )
+    .is_err());
+}
