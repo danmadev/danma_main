@@ -350,25 +350,21 @@ impl NodeState {
                 })),
             }
         }
-        unrouted.extend(local
-            .failures
-            .into_iter()
-            .map(|failure| {
-                let reason = match failure.kind {
-                    ForwardFailureKind::HopLimitExhausted => "forward_hops_exhausted",
-                    ForwardFailureKind::Expired => "expired",
-                    ForwardFailureKind::DeliveryBudgetExceeded => "local_delivery_budget_exceeded",
-                    ForwardFailureKind::RemoteEgressBudgetExceeded => "remote_egress_budget_exceeded",
-                    ForwardFailureKind::Shard(_) => "local_shard_error",
-                };
-                json!({
-                    "target":failure.target,
-                    "edge_id":failure.edge_id,
-                    "reason":reason,
-                    "detail":format!("{:?}", failure.kind)
-                })
+        unrouted.extend(local.failures.into_iter().map(|failure| {
+            let reason = match failure.kind {
+                ForwardFailureKind::HopLimitExhausted => "forward_hops_exhausted",
+                ForwardFailureKind::Expired => "expired",
+                ForwardFailureKind::DeliveryBudgetExceeded => "local_delivery_budget_exceeded",
+                ForwardFailureKind::RemoteEgressBudgetExceeded => "remote_egress_budget_exceeded",
+                ForwardFailureKind::Shard(_) => "local_shard_error",
+            };
+            json!({
+                "target":failure.target,
+                "edge_id":failure.edge_id,
+                "reason":reason,
+                "detail":format!("{:?}", failure.kind)
             })
-            .collect::<Vec<_>>());
+        }));
 
         for remote in local.remote {
             let event_id = match u64::try_from(remote.event_id) {
