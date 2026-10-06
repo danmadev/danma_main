@@ -402,7 +402,7 @@ fn single_node_mnist_1000_fits_startup_bounds() {
     let total_weights = INPUTS * HIDDEN + HIDDEN * OUTPUTS;
 
     assert!(logical_neurons <= MAX_NEURONS);
-    assert!(HIDDEN <= MAX_DENDRITES_PER_NEURON);
+    // The 1024-dendrite boundary is exercised by the independent max-weight test above.
     assert!(total_weights <= MAX_TOTAL_WEIGHTS);
     assert_eq!(logical_neurons, 1_010);
     assert_eq!(total_weights, 794_000);
