@@ -24,17 +24,47 @@ LR = 0.1
 
 
 def _balanced(images: torch.Tensor, labels: torch.Tensor, count: int, seed: int):
+    """Return exactly count stratified examples, as balanced as capacity allows.
+
+    MNIST's 10k test split is not class-balanced. The previous implementation
+    silently returned fewer rows when a requested per-class quota exceeded the
+    available class capacity. This allocator redistributes that deficit to
+    classes with spare examples while preserving deterministic sampling.
+    """
     if not 1 <= count <= len(labels):
         raise ValueError("subset size outside dataset")
-    g = torch.Generator().manual_seed(seed)
+    if labels.ndim != 1 or len(images) != len(labels):
+        raise ValueError("images/labels length mismatch")
+
+    capacities = torch.bincount(labels, minlength=10).tolist()
+    if len(capacities) != 10:
+        raise ValueError("labels must contain MNIST classes 0..9")
+
     per_class, extra = divmod(count, 10)
+    quotas = [min(capacities[cls], per_class + int(cls < extra)) for cls in range(10)]
+    deficit = count - sum(quotas)
+
+    while deficit:
+        progressed = False
+        for cls in range(10):
+            if quotas[cls] < capacities[cls]:
+                quotas[cls] += 1
+                deficit -= 1
+                progressed = True
+                if deficit == 0:
+                    break
+        if not progressed:
+            raise ValueError("cannot allocate requested stratified subset")
+
+    g = torch.Generator().manual_seed(seed)
     chunks = []
-    for cls in range(10):
+    for cls, take in enumerate(quotas):
         candidates = torch.nonzero(labels == cls, as_tuple=False).flatten()
-        take = per_class + int(cls < extra)
         order = torch.randperm(len(candidates), generator=g)[:take]
         chunks.append(candidates[order])
     index = torch.cat(chunks)
+    if len(index) != count:
+        raise AssertionError("stratified sampler did not return the requested count")
     index = index[torch.randperm(len(index), generator=g)]
     return images[index].contiguous(), labels[index].contiguous()
 
@@ -497,7 +527,7 @@ def _parse_backends(value: str):
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--node-binary", type=Path, default=Path("target/debug/danma-node"))
     parser.add_argument("--data-dir", type=Path, default=Path.home() / ".cache/danma/mnist")
     parser.add_argument("--train-samples", type=int, default=1024)
