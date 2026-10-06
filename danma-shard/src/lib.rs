@@ -74,6 +74,10 @@ enum Command {
         input: Forward,
         answer: oneshot::Sender<Result<ForwardOutcome, ShardError>>,
     },
+    ForwardBatch {
+        items: Vec<(NeuronId, Forward)>,
+        answer: oneshot::Sender<Vec<(NeuronId, Result<ForwardOutcome, ShardError>)>>,
+    },
     Signal {
         target: NeuronId,
         input: ForwardSignal,
@@ -84,6 +88,11 @@ enum Command {
         input: Feedback,
         clock: BackwardClock,
         answer: oneshot::Sender<Result<FeedbackStatus, ShardError>>,
+    },
+    BackwardBatchLive {
+        items: Vec<(NeuronId, Feedback)>,
+        deadline: Instant,
+        answer: oneshot::Sender<Vec<(NeuronId, Result<FeedbackStatus, ShardError>)>>,
     },
     Inspect {
         target: NeuronId,
@@ -110,6 +119,23 @@ fn process(command: Command, neurons: &mut BTreeMap<NeuronId, Neuron>) {
                     })
                 });
             let _ = answer.send(response);
+        }
+        Command::ForwardBatch { items, answer } => {
+            let mut responses = Vec::with_capacity(items.len());
+            for (target, input) in items {
+                let response = neurons
+                    .get_mut(&target)
+                    .ok_or(ShardError::UnknownNeuron(target))
+                    .and_then(|neuron| {
+                        let output = neuron.forward(input).map_err(ShardError::Core)?;
+                        Ok(ForwardOutcome {
+                            output,
+                            axons: neuron.axons().to_vec(),
+                        })
+                    });
+                responses.push((target, response));
+            }
+            let _ = answer.send(responses);
         }
         Command::Signal { target, input, answer } => {
             let response = neurons
@@ -142,6 +168,28 @@ fn process(command: Command, neurons: &mut BTreeMap<NeuronId, Neuron>) {
                 .ok_or(ShardError::UnknownNeuron(target))
                 .and_then(|neuron| neuron.backward(input, now_ms).map_err(ShardError::Core));
             let _ = answer.send(response);
+        }
+        Command::BackwardBatchLive {
+            items,
+            deadline,
+            answer,
+        } => {
+            let mut responses = Vec::with_capacity(items.len());
+            for (target, input) in items {
+                let response = if Instant::now() >= deadline {
+                    Ok(FeedbackStatus::Expired)
+                } else {
+                    let now_ms = epoch_millis();
+                    neurons
+                        .get_mut(&target)
+                        .ok_or(ShardError::UnknownNeuron(target))
+                        .and_then(|neuron| {
+                            neuron.backward(input, now_ms).map_err(ShardError::Core)
+                        })
+                };
+                responses.push((target, response));
+            }
+            let _ = answer.send(responses);
         }
         Command::Inspect { target, answer } => {
             let response = neurons
@@ -278,6 +326,51 @@ impl Shard {
         .await
     }
 
+    /// Execute many independent neuron forwards as one mailbox command per
+    /// worker. Logical EventIDs and neuron state remain independent; this only
+    /// changes physical execution granularity.
+    pub async fn forward_batch(
+        &self,
+        items: Vec<(NeuronId, Forward)>,
+    ) -> Result<Vec<(NeuronId, Result<ForwardOutcome, ShardError>)>, ShardError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut partitions: Vec<Vec<(NeuronId, Forward)>> =
+            (0..self.workers.len()).map(|_| Vec::new()).collect();
+        for (target, input) in items {
+            let worker = *self
+                .owners
+                .get(&target)
+                .ok_or(ShardError::UnknownNeuron(target))?;
+            partitions[worker].push((target, input));
+        }
+
+        let mut receivers = Vec::new();
+        for (worker, items) in partitions.into_iter().enumerate() {
+            if items.is_empty() {
+                continue;
+            }
+            let (sender, receiver) = oneshot::channel();
+            self.workers[worker]
+                .try_send(Command::ForwardBatch {
+                    items,
+                    answer: sender,
+                })
+                .map_err(|err| match err {
+                    mpsc::error::TrySendError::Full(_) => ShardError::Busy,
+                    mpsc::error::TrySendError::Closed(_) => ShardError::WorkerStopped,
+                })?;
+            receivers.push(receiver);
+        }
+
+        let mut results = Vec::new();
+        for receiver in receivers {
+            results.extend(receiver.await.map_err(|_| ShardError::WorkerStopped)?);
+        }
+        Ok(results)
+    }
+
     pub async fn signal(
         &self,
         target: NeuronId,
@@ -334,6 +427,52 @@ impl Shard {
             },
             receiver,
         ).await
+    }
+
+    /// Batch live backward preserving one feedback identity and one neuron
+    /// update per item. Commands are grouped only by local CPU worker.
+    pub async fn backward_batch_live(
+        &self,
+        items: Vec<(NeuronId, Feedback)>,
+        deadline: Instant,
+    ) -> Result<Vec<(NeuronId, Result<FeedbackStatus, ShardError>)>, ShardError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut partitions: Vec<Vec<(NeuronId, Feedback)>> =
+            (0..self.workers.len()).map(|_| Vec::new()).collect();
+        for (target, input) in items {
+            let worker = *self
+                .owners
+                .get(&target)
+                .ok_or(ShardError::UnknownNeuron(target))?;
+            partitions[worker].push((target, input));
+        }
+
+        let mut receivers = Vec::new();
+        for (worker, items) in partitions.into_iter().enumerate() {
+            if items.is_empty() {
+                continue;
+            }
+            let (sender, receiver) = oneshot::channel();
+            self.workers[worker]
+                .try_send(Command::BackwardBatchLive {
+                    items,
+                    deadline,
+                    answer: sender,
+                })
+                .map_err(|err| match err {
+                    mpsc::error::TrySendError::Full(_) => ShardError::Busy,
+                    mpsc::error::TrySendError::Closed(_) => ShardError::WorkerStopped,
+                })?;
+            receivers.push(receiver);
+        }
+
+        let mut results = Vec::new();
+        for receiver in receivers {
+            results.extend(receiver.await.map_err(|_| ShardError::WorkerStopped)?);
+        }
+        Ok(results)
     }
 
     pub async fn inspect(&self, target: NeuronId) -> Result<NeuronInfo, ShardError> {

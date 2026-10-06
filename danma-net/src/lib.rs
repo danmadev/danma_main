@@ -32,6 +32,7 @@ const MAX_IO_WAIT: Duration = Duration::from_secs(4);
 const MAX_CONCURRENT_CONNECTIONS: usize = 32;
 const MAX_INCOMING_INPUTS: usize = MAX_DENDRITES_PER_NEURON;
 const MAX_EXPECTED_BRANCHES: usize = MAX_AXONS_PER_NEURON;
+const MAX_SHARD_TARGETS: usize = 1_024;
 const DEFAULT_ROUTE_HOPS: u8 = 4;
 const DEFAULT_FORWARD_HOPS: u8 = 32;
 
@@ -151,6 +152,30 @@ struct Input {
     value: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShardInput {
+    from: u64,
+    #[serde(deserialize_with = "deserialize_finite_f32")]
+    value: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShardForwardTarget {
+    target: u64,
+    event_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShardGradient {
+    target: u64,
+    event_id: u64,
+    #[serde(deserialize_with = "deserialize_finite_f32")]
+    gradient: f32,
+}
+
 fn deserialize_finite_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -191,6 +216,14 @@ enum Message {
         inputs: Vec<Input>,
         expected: Vec<Source>,
     },
+    ForwardShard {
+        targets: Vec<ShardForwardTarget>,
+        trace_id: u64,
+        #[serde(default = "default_forward_hops")]
+        forward_hops: u8,
+        inputs: Vec<ShardInput>,
+        training: bool,
+    },
     Signal {
         target: u64,
         event_id: u64,
@@ -213,6 +246,12 @@ enum Message {
         ttl_ms: u64,
         gradient_hops: u8,
         route_hops: u8,
+    },
+    BackwardShard {
+        targets: Vec<ShardGradient>,
+        input_ids: Vec<u64>,
+        ttl_ms: u64,
+        gradient_hops: u8,
     },
 }
 
@@ -543,6 +582,130 @@ impl NodeState {
                     Err(err) => error_response(&format!("forward_{err:?}")),
                 }
             }
+            Message::ForwardShard {
+                targets,
+                trace_id,
+                forward_hops,
+                inputs,
+                training,
+            } => {
+                if targets.is_empty()
+                    || targets.len() > MAX_SHARD_TARGETS
+                    || inputs.is_empty()
+                    || inputs.len() > MAX_INCOMING_INPUTS
+                    || trace_id == 0
+                {
+                    return error_response("invalid_shard_forward");
+                }
+
+                let mut seen_targets = BTreeMap::new();
+                let mut seen_events = BTreeMap::new();
+                for item in &targets {
+                    if item.target == 0
+                        || item.event_id == 0
+                        || !self.shard.contains(item.target)
+                        || seen_targets.insert(item.target, ()).is_some()
+                        || seen_events.insert(item.event_id, ()).is_some()
+                    {
+                        return error_response("invalid_or_nonlocal_shard_target");
+                    }
+                }
+                let mut seen_inputs = BTreeMap::new();
+                for input in &inputs {
+                    if input.from == 0 || seen_inputs.insert(input.from, ()).is_some() {
+                        return error_response("invalid_shard_input");
+                    }
+                }
+
+                let items = targets
+                    .iter()
+                    .map(|item| {
+                        (
+                            item.target,
+                            Forward {
+                                event_id: u128::from(item.event_id),
+                                trace_id: u128::from(trace_id),
+                                now_ms: elapsed_millis(),
+                                inputs: inputs
+                                    .iter()
+                                    .map(|input| SynapticInput {
+                                        from: input.from,
+                                        source_event_id: u128::from(item.event_id),
+                                        value: input.value,
+                                    })
+                                    .collect(),
+                                expected: if training {
+                                    vec![FeedbackSource::Teacher]
+                                } else {
+                                    Vec::new()
+                                },
+                            },
+                        )
+                    })
+                    .collect();
+
+                let outcomes = match self.shard.forward_batch(items).await {
+                    Ok(outcomes) => outcomes,
+                    Err(err) => return error_response(&format!("forward_shard_{err:?}")),
+                };
+                let mut by_target = BTreeMap::new();
+                for (target, result) in outcomes {
+                    by_target.insert(target, result);
+                }
+
+                let mut all_ok = true;
+                let mut results = Vec::with_capacity(targets.len());
+                for item in targets {
+                    match by_target.remove(&item.target) {
+                        Some(Ok(outcome)) => {
+                            let (terminals, unrouted) = self
+                                .cascade_forward(
+                                    ForwardEmission {
+                                        source: item.target,
+                                        source_event_id: item.event_id,
+                                        trace_id,
+                                        output: outcome.output,
+                                        training,
+                                        forward_hops,
+                                    },
+                                    &outcome.axons,
+                                )
+                                .await;
+                            results.push(json!({
+                                "target":item.target,
+                                "event_id":item.event_id,
+                                "status":"ok",
+                                "output":outcome.output,
+                                "terminals":terminals,
+                                "unrouted":unrouted
+                            }));
+                        }
+                        Some(Err(err)) => {
+                            all_ok = false;
+                            results.push(json!({
+                                "target":item.target,
+                                "event_id":item.event_id,
+                                "status":"error",
+                                "code":format!("{err:?}")
+                            }));
+                        }
+                        None => {
+                            all_ok = false;
+                            results.push(json!({
+                                "target":item.target,
+                                "event_id":item.event_id,
+                                "status":"error",
+                                "code":"missing_worker_result"
+                            }));
+                        }
+                    }
+                }
+                json!({
+                    "kind":"forward_shard_result",
+                    "status":if all_ok {"ok"} else {"partial"},
+                    "results":results
+                })
+            }
             Message::Signal {
                 target,
                 event_id,
@@ -787,6 +950,159 @@ impl NodeState {
                         })
                     }
                 }
+            }
+            Message::BackwardShard {
+                targets,
+                input_ids,
+                ttl_ms,
+                gradient_hops,
+            } => {
+                if targets.is_empty()
+                    || targets.len() > MAX_SHARD_TARGETS
+                    || input_ids.is_empty()
+                    || input_ids.len() > MAX_INCOMING_INPUTS
+                    || ttl_ms == 0
+                {
+                    return error_response("invalid_shard_backward");
+                }
+
+                let mut seen_targets = BTreeMap::new();
+                let mut seen_events = BTreeMap::new();
+                for item in &targets {
+                    if item.target == 0
+                        || item.event_id == 0
+                        || !self.shard.contains(item.target)
+                        || seen_targets.insert(item.target, ()).is_some()
+                        || seen_events.insert(item.event_id, ()).is_some()
+                    {
+                        return error_response("invalid_or_nonlocal_shard_target");
+                    }
+                }
+
+                let mut input_positions = BTreeMap::new();
+                for (index, input_id) in input_ids.iter().copied().enumerate() {
+                    if input_id == 0
+                        || input_positions.insert(input_id, index).is_some()
+                        || self.shard.contains(input_id)
+                        || self.target_address(input_id).await.is_some()
+                    {
+                        return error_response("shard_backward_requires_unrouted_host_inputs");
+                    }
+                }
+
+                let deadline = match Instant::now().checked_add(Duration::from_millis(ttl_ms)) {
+                    Some(deadline) => deadline,
+                    None => return error_response("invalid_ttl"),
+                };
+                let packets = targets
+                    .iter()
+                    .map(|item| {
+                        let now = elapsed_millis();
+                        (
+                            item.target,
+                            Feedback {
+                                event_id: u128::from(item.event_id),
+                                from: FeedbackSource::Teacher,
+                                gradient: item.gradient,
+                                expires_at_ms: now.saturating_add(ttl_ms),
+                                hops_left: gradient_hops,
+                            },
+                        )
+                    })
+                    .collect();
+
+                let outcomes = match self.shard.backward_batch_live(packets, deadline).await {
+                    Ok(outcomes) => outcomes,
+                    Err(err) => return error_response(&format!("backward_shard_{err:?}")),
+                };
+                let mut by_target = BTreeMap::new();
+                for (target, result) in outcomes {
+                    by_target.insert(target, result);
+                }
+
+                let mut all_applied = true;
+                let mut accumulated = vec![0.0_f32; input_ids.len()];
+                let mut results = Vec::with_capacity(targets.len());
+                for item in targets {
+                    match by_target.remove(&item.target) {
+                        Some(Ok(FeedbackStatus::Applied { upstream, version })) => {
+                            let mut valid_upstream = upstream.len() == input_ids.len();
+                            let mut seen_inputs = BTreeMap::new();
+                            for dispatch in upstream {
+                                if let Some(index) = input_positions.get(&dispatch.target_neuron_id) {
+                                    if seen_inputs
+                                        .insert(dispatch.target_neuron_id, ())
+                                        .is_some()
+                                    {
+                                        valid_upstream = false;
+                                    } else {
+                                        accumulated[*index] += dispatch.feedback.gradient;
+                                    }
+                                } else {
+                                    valid_upstream = false;
+                                }
+                            }
+                            valid_upstream =
+                                valid_upstream && seen_inputs.len() == input_ids.len();
+                            if valid_upstream {
+                                results.push(json!({
+                                    "target":item.target,
+                                    "event_id":item.event_id,
+                                    "status":"applied",
+                                    "version":version
+                                }));
+                            } else {
+                                all_applied = false;
+                                results.push(json!({
+                                    "target":item.target,
+                                    "event_id":item.event_id,
+                                    "status":"error",
+                                    "code":"unexpected_upstream_gradient"
+                                }));
+                            }
+                        }
+                        Some(Ok(FeedbackStatus::Pending { remaining })) => {
+                            all_applied = false;
+                            results.push(json!({"target":item.target,"event_id":item.event_id,"status":"pending","remaining":remaining}));
+                        }
+                        Some(Ok(FeedbackStatus::IgnoredDuplicate)) => {
+                            all_applied = false;
+                            results.push(json!({"target":item.target,"event_id":item.event_id,"status":"ignored_duplicate"}));
+                        }
+                        Some(Ok(FeedbackStatus::Expired)) => {
+                            all_applied = false;
+                            results.push(json!({"target":item.target,"event_id":item.event_id,"status":"expired"}));
+                        }
+                        Some(Ok(FeedbackStatus::Stale)) => {
+                            all_applied = false;
+                            results.push(json!({"target":item.target,"event_id":item.event_id,"status":"stale"}));
+                        }
+                        Some(Err(err)) => {
+                            all_applied = false;
+                            results.push(json!({
+                                "target":item.target,
+                                "event_id":item.event_id,
+                                "status":"error",
+                                "code":format!("{err:?}")
+                            }));
+                        }
+                        None => {
+                            all_applied = false;
+                            results.push(json!({
+                                "target":item.target,
+                                "event_id":item.event_id,
+                                "status":"error",
+                                "code":"missing_worker_result"
+                            }));
+                        }
+                    }
+                }
+                json!({
+                    "kind":"backward_shard_result",
+                    "status":if all_applied {"applied"} else {"partial"},
+                    "results":results,
+                    "input_gradients":accumulated
+                })
             }
         }
     }

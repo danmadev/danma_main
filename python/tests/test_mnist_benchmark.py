@@ -21,6 +21,23 @@ class MNISTBenchmarkUnitTests(unittest.TestCase):
         self.assertEqual(tuple(subset_images.shape), (20, 784))
         self.assertEqual(torch.bincount(subset_labels, minlength=10).tolist(), [2] * 10)
 
+    def test_stratified_subset_returns_exact_count_when_classes_are_imbalanced(self) -> None:
+        counts = [1, 3] + [2] * 8
+        labels = torch.cat([
+            torch.full((count,), cls, dtype=torch.long)
+            for cls, count in enumerate(counts)
+        ])
+        images = torch.arange(len(labels) * 784, dtype=torch.float32).reshape(len(labels), 784)
+        subset_images, subset_labels = _balanced(
+            images, labels, len(labels), seed=11
+        )
+        self.assertEqual(tuple(subset_images.shape), (len(labels), 784))
+        self.assertEqual(len(subset_labels), len(labels))
+        self.assertEqual(
+            torch.bincount(subset_labels, minlength=10).tolist(),
+            counts,
+        )
+
     def test_cpu_backend_reports_quality_and_speed(self) -> None:
         torch.manual_seed(0)
         train_x = torch.rand(16, 784)

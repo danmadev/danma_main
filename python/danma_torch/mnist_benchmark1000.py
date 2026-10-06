@@ -570,7 +570,8 @@ def run_remote(context, metrics, *, checkpoint):
             raise ValueError('remote initialization does not exactly roundtrip shared float32 values')
         metrics['initial_state_sha256'] = tensor_digest(state)
         checkpoint()
-        model = RemoteModel(cluster.client, layout)
+        model_cls = context.get('remote_model_cls', RemoteModel)
+        model = model_cls(cluster.client, layout)
         return train_and_measure(model, context['initial'], context['dataset'], context['orders'],
                                  torch.device('cpu'), metrics, checkpoint=checkpoint, cluster=cluster)
     except Exception:
@@ -591,11 +592,16 @@ def run_remote(context, metrics, *, checkpoint):
         metrics['end_to_end_seconds'] = time.perf_counter() - started
         metrics['children_stopped'] = all(p.poll() is not None for p in cluster.processes)
         metrics['logical_request_total'] = sum(cluster.counts.values())
-        metrics['logical_request_kind_totals'] = dict(Counter({kind: sum(count for key, count in cluster.counts.items() if key.endswith(':' + kind))
-                                                              for kind in ('forward', 'backward', 'inspect', 'routes')}))
+        kind_totals = Counter()
+        for key, count in cluster.counts.items():
+            kind_totals[key.rsplit(':', 1)[-1]] += count
+        metrics['logical_request_kind_totals'] = dict(kind_totals)
         if metrics.get('train_seconds'):
-            metrics['logical_train_requests_per_second'] = (cluster.counts.get('train:forward', 0) +
-                                                           cluster.counts.get('train:backward', 0)) / metrics['train_seconds']
+            train_requests = sum(
+                cluster.counts.get(f'train:{kind}', 0)
+                for kind in ('forward', 'backward', 'forward_shard', 'backward_shard')
+            )
+            metrics['logical_train_requests_per_second'] = train_requests / metrics['train_seconds']
         checkpoint()
 
 
@@ -660,7 +666,7 @@ def run_benchmark(*, run_dir=None, json_out=None, node_binary=Path('target/relea
                   data_dir=None, train_samples=20, test_samples=10,
                   epochs=1, batch_size=1, seed=7, nodes=10, backends=('cpu', 'cuda', 'danma'),
                   download=True, require_cuda=False, parity_tolerance=2e-5, tolerance_reason=None,
-                  layout=None, provenance_files=()):
+                  layout=None, provenance_files=(), remote_model_cls=RemoteModel):
     validate_options(train_samples=train_samples, test_samples=test_samples, epochs=epochs,
                      batch_size=batch_size, nodes=nodes, backends=backends, require_cuda=require_cuda,
                      layout=layout)
@@ -733,9 +739,21 @@ def run_benchmark(*, run_dir=None, json_out=None, node_binary=Path('target/relea
                 raise ValueError('MNIST loader returned invalid shape/dtype')
             if bool(((y < 0) | (y >= 10)).any()):
                 raise ValueError('MNIST labels must be 0..9')
-        report['dataset'] = dict(train_samples=train_samples, test_samples=test_samples, balanced_subset=True,
-            data_seconds=time.perf_counter() - before, sha256=tensor_digest(dataset),
-            train_class_counts=torch.bincount(dataset[1], minlength=10).tolist(), test_class_counts=torch.bincount(dataset[3], minlength=10).tolist())
+        train_counts = torch.bincount(dataset[1], minlength=10).tolist()
+        test_counts = torch.bincount(dataset[3], minlength=10).tolist()
+        report['dataset'] = dict(
+            train_samples=train_samples,
+            test_samples=test_samples,
+            stratified_subset=True,
+            balanced_subset=(max(train_counts) - min(train_counts) <= 1
+                             and max(test_counts) - min(test_counts) <= 1),
+            train_balanced=max(train_counts) - min(train_counts) <= 1,
+            test_balanced=max(test_counts) - min(test_counts) <= 1,
+            data_seconds=time.perf_counter() - before,
+            sha256=tensor_digest(dataset),
+            train_class_counts=train_counts,
+            test_class_counts=test_counts,
+        )
         if min(train_samples, test_samples) < 10:
             report['dataset']['warning'] = 'less than ten samples omits classes; smoke proves execution only'
             progress(report['dataset']['warning'])
@@ -744,7 +762,15 @@ def run_benchmark(*, run_dir=None, json_out=None, node_binary=Path('target/relea
         torch.save(initial, run_dir / 'initial-state.pt')
         orders = _orders(train_samples, epochs, seed + 2)
         report['training']['order_sha256'] = tensor_digest(orders)
-        context = dict(run_dir=run_dir, node_binary=node_binary, initial=initial, dataset=dataset, orders=orders, layout=layout)
+        context = dict(
+            run_dir=run_dir,
+            node_binary=node_binary,
+            initial=initial,
+            dataset=dataset,
+            orders=orders,
+            layout=layout,
+            remote_model_cls=remote_model_cls,
+        )
         checkpoint()
         for name in backends:
             metrics = report['results'][name]

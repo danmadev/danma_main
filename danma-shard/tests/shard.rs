@@ -137,3 +137,76 @@ async fn elapsed_transport_deadline_is_checked_by_cpu_worker_before_learning() {
     ));
     assert_eq!(shard.inspect(1).await.unwrap().version, 1);
 }
+
+
+#[tokio::test]
+async fn local_batch_preserves_independent_event_and_version_semantics() {
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    let shard = Shard::new(
+        vec![neuron(1, 99, 2.0), neuron(2, 99, 3.0)],
+        2,
+        8,
+    )
+    .unwrap();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    let make_forward = |event_id| Forward {
+        event_id,
+        trace_id: 77,
+        now_ms,
+        inputs: vec![SynapticInput {
+            from: 99,
+            source_event_id: event_id,
+            value: 4.0,
+        }],
+        expected: vec![FeedbackSource::Teacher],
+    };
+    let forwarded = shard
+        .forward_batch(vec![(1, make_forward(10)), (2, make_forward(20))])
+        .await
+        .unwrap();
+    let outputs: BTreeMap<_, _> = forwarded
+        .into_iter()
+        .map(|(target, result)| (target, result.unwrap().output))
+        .collect();
+    assert_eq!(outputs.get(&1), Some(&8.0));
+    assert_eq!(outputs.get(&2), Some(&12.0));
+
+    let make_feedback = |event_id| Feedback {
+        event_id,
+        from: FeedbackSource::Teacher,
+        gradient: 1.0,
+        expires_at_ms: now_ms + 5_000,
+        hops_left: 2,
+    };
+    let learned = shard
+        .backward_batch_live(
+            vec![(1, make_feedback(10)), (2, make_feedback(20))],
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(learned.len(), 2);
+    for (_, result) in learned {
+        assert!(matches!(result.unwrap(), FeedbackStatus::Applied { .. }));
+    }
+    assert_eq!(shard.inspect(1).await.unwrap().version, 1);
+    assert_eq!(shard.inspect(2).await.unwrap().version, 1);
+
+    // A redelivery of only one contribution is still deduplicated per neuron.
+    let duplicate = shard
+        .backward_batch_live(
+            vec![(1, make_feedback(10))],
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate[0].1.as_ref().unwrap(), &FeedbackStatus::IgnoredDuplicate);
+    assert_eq!(shard.inspect(1).await.unwrap().version, 1);
+    assert_eq!(shard.inspect(2).await.unwrap().version, 1);
+}
