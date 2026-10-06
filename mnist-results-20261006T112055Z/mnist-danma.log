@@ -1,0 +1,89 @@
+{
+  "benchmark": "mnist-linear-784x10",
+  "comparisons": {},
+  "dataset": {
+    "balanced_subset": true,
+    "load_and_subset_seconds": 1.3013695480040042,
+    "test_samples": 512,
+    "train_samples": 1024
+  },
+  "environment": {
+    "cpu_threads": 8,
+    "platform": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "torch": "2.14.1+cu130"
+  },
+  "model": {
+    "classes": 10,
+    "initialization": "zeros",
+    "input_features": 784,
+    "learning_rate": 0.1,
+    "loss": "cross_entropy",
+    "optimizer": "SGD"
+  },
+  "results": {
+    "danma": {
+      "cluster_startup_seconds": 0.05889374899561517,
+      "device": "danma-remote-cpu",
+      "end_to_end_seconds": 246.6959529559972,
+      "epoch_seconds": [
+        77.37110467599996,
+        77.08349322200229,
+        80.25463196099736
+      ],
+      "eval_batch_latency_seconds": {
+        "max": 0.21335333699244075,
+        "mean": 0.18635578425096355,
+        "p50": 0.18540070599556202,
+        "p95": 0.19885427389599497
+      },
+      "eval_samples_per_second": 42.92486502025778,
+      "eval_seconds": 11.927818520998699,
+      "expected_version_per_neuron": 3072,
+      "final_train_loss": 0.380313306406606,
+      "nodes": 3,
+      "status": "ok",
+      "test_accuracy": 0.875,
+      "test_loss": 0.5036903605796397,
+      "train_batch_latency_seconds": {
+        "max": 0.7379476710048039,
+        "mean": 0.611180858146175,
+        "p50": 0.6102076765091624,
+        "p95": 0.6501134807025664
+      },
+      "train_samples_per_second": 13.08853452476446,
+      "train_seconds": 234.7092406860029,
+      "train_transport_requests_per_second": 261.7706904952892,
+      "transport_requests": {
+        "eval_forward": 5120,
+        "inspect": 10,
+        "train_backward": 30720,
+        "train_forward": 30720
+      },
+      "versions": [
+        3072,
+        3072,
+        3072,
+        3072,
+        3072,
+        3072,
+        3072,
+        3072,
+        3072,
+        3072
+      ]
+    }
+  },
+  "timing_semantics": {
+    "cuda_batch_latency": "CUDA-event device latency; epoch wall time synchronizes at boundaries",
+    "danma_cluster_startup_excluded_from_train_seconds": true,
+    "eval_seconds": "wall time including host-to-backend staging/serialization",
+    "train_seconds": "wall time including host-to-backend staging/serialization"
+  },
+  "training": {
+    "batch_size": 8,
+    "epochs": 3,
+    "same_epoch_order_for_all_backends": true,
+    "seed": 7
+  }
+}

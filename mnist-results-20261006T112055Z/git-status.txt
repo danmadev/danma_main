@@ -1,0 +1,6 @@
+MM .gitignore
+M  danma-net/Cargo.toml
+M  danma-net/src/lib.rs
+A  danma-net/src/protocol_tests.rs
+A  danma-net/tests/numeric_protocol.rs
+?? mnist-results-20261006T112055Z/

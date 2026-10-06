@@ -1,0 +1,654 @@
+diff --git a/.gitignore b/.gitignore
+index 42b5616..0b6fa4d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -21,3 +21,5 @@ Cargo.lock
+ #.idea//target
+ python/danma_torch/__pycache__/
+ verify-run/venv/
++python/tests/
++verify-run/
+\ No newline at end of file
+diff --git a/danma-net/Cargo.toml b/danma-net/Cargo.toml
+index fa86816..34bffc8 100644
+--- a/danma-net/Cargo.toml
++++ b/danma-net/Cargo.toml
+@@ -14,4 +14,7 @@ danma-core = { path = "../danma-core" }
+ danma-shard = { path = "../danma-shard" }
+ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+ serde = { version = "1", features = ["derive"] }
+-serde_json = { version = "1", features = ["arbitrary_precision"] }
++# Native JSON integers retain the full u64 range. arbitrary_precision exposes
++# some floats as private maps that Serde's internally tagged enum buffer rejects.
++# Accurate f64 parsing also keeps valid f32 boundary literals inside their range.
++serde_json = { version = "1", features = ["float_roundtrip"] }
+diff --git a/danma-net/src/lib.rs b/danma-net/src/lib.rs
+index bcbe8e4..524fc4a 100644
+--- a/danma-net/src/lib.rs
++++ b/danma-net/src/lib.rs
+@@ -104,14 +104,15 @@ pub struct Advert {
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+ enum Source {
+-    Teacher,
++    // Empty struct variants enforce deny_unknown_fields; unit variants do not.
++    Teacher {},
+     Neuron { neuron_id: u64, event_id: u64 },
+ }
+ 
+ impl From<Source> for FeedbackSource {
+     fn from(source: Source) -> Self {
+         match source {
+-            Source::Teacher => FeedbackSource::Teacher,
++            Source::Teacher {} => FeedbackSource::Teacher,
+             Source::Neuron {
+                 neuron_id,
+                 event_id,
+@@ -128,7 +129,7 @@ impl TryFrom<FeedbackSource> for Source {
+ 
+     fn try_from(source: FeedbackSource) -> io::Result<Self> {
+         Ok(match source {
+-            FeedbackSource::Teacher => Self::Teacher,
++            FeedbackSource::Teacher => Self::Teacher {},
+             FeedbackSource::Neuron {
+                 neuron_id,
+                 event_id,
+@@ -146,9 +147,22 @@ impl TryFrom<FeedbackSource> for Source {
+ struct Input {
+     from: u64,
+     source_event_id: u64,
++    #[serde(deserialize_with = "deserialize_finite_f32")]
+     value: f32,
+ }
+ 
++fn deserialize_finite_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
++where
++    D: serde::Deserializer<'de>,
++{
++    let value = f64::deserialize(deserializer)?;
++    // Check before narrowing: values just beyond f32::MAX can round down to it.
++    if !value.is_finite() || value.abs() > f64::from(f32::MAX) {
++        return Err(serde::de::Error::custom("expected a finite f32"));
++    }
++    Ok(value as f32)
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+ enum Message {
+@@ -156,7 +170,8 @@ enum Message {
+         from_node: u64,
+         routes: Vec<Advert>,
+     },
+-    Routes,
++    // Unlike a unit variant, an empty struct enforces deny_unknown_fields.
++    Routes {},
+     Inspect {
+         target: u64,
+         route_hops: u8,
+@@ -183,6 +198,7 @@ enum Message {
+         edge_id: u64,
+         from: u64,
+         source_event_id: u64,
++        #[serde(deserialize_with = "deserialize_finite_f32")]
+         value: f32,
+         training: bool,
+         forward_hops: u8,
+@@ -192,6 +208,7 @@ enum Message {
+         target: u64,
+         event_id: u64,
+         from: Source,
++        #[serde(deserialize_with = "deserialize_finite_f32")]
+         gradient: f32,
+         ttl_ms: u64,
+         gradient_hops: u8,
+@@ -337,7 +354,7 @@ impl NodeState {
+ 
+     async fn process(&self, msg: Message) -> Value {
+         match msg {
+-            Message::Routes => {
++            Message::Routes {} => {
+                 let routes: BTreeMap<_, _> = self
+                     .routes
+                     .read()
+@@ -795,6 +812,11 @@ fn error_response(code: &str) -> Value {
+     json!({"kind":"error","code":code})
+ }
+ 
++fn decode_message(incoming: &[u8]) -> Result<Message, serde_json::Error> {
++    let value = serde_json::from_slice::<Value>(incoming)?;
++    serde_json::from_value(value)
++}
++
+ async fn handle_connection(mut stream: TcpStream, state: Arc<NodeState>) -> io::Result<()> {
+     let incoming = timeout(MAX_IO_WAIT, read_frame_bytes(&mut stream))
+         .await
+@@ -807,12 +829,9 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<NodeState>) -> io::
+             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "response timed out"))?;
+     }
+ 
+-    let reply = match serde_json::from_slice::<Value>(&incoming)
+-        .ok()
+-        .and_then(|value| serde_json::from_value::<Message>(value).ok())
+-    {
+-        Some(message) => state.process(message).await,
+-        None => error_response("invalid_protocol_message"),
++    let reply = match decode_message(&incoming) {
++        Ok(message) => state.process(message).await,
++        Err(_) => error_response("invalid_protocol_message"),
+     };
+     timeout(MAX_IO_WAIT, write_frame(&mut stream, &reply))
+         .await
+@@ -916,3 +935,6 @@ pub async fn serve(config: NodeConfig) -> io::Result<()> {
+ fn is_loopback(ip: IpAddr) -> bool {
+     ip.is_loopback()
+ }
++
++#[cfg(test)]
++mod protocol_tests;
+diff --git a/danma-net/src/protocol_tests.rs b/danma-net/src/protocol_tests.rs
+new file mode 100644
+index 0000000..c1ab8bd
+--- /dev/null
++++ b/danma-net/src/protocol_tests.rs
+@@ -0,0 +1,275 @@
++use super::*;
++
++const CAPTURED: &str = r#"{"kind":"backward","target":10002,"event_id":9720822987784714125,"from":{"kind":"teacher"},"gradient":5.251302718534134e-05,"ttl_ms":3000,"gradient_hops":2,"route_hops":4}"#;
++
++fn backward(token: &str) -> String {
++    CAPTURED.replace("5.251302718534134e-05", token)
++}
++
++fn forward(token: &str) -> String {
++    format!(
++        r#"{{"kind":"forward","target":1,"event_id":2,"trace_id":3,"route_hops":4,"forward_hops":32,"inputs":[{{"from":99,"source_event_id":5,"value":{token}}}],"expected":[{{"kind":"neuron","neuron_id":6,"event_id":7}}]}}"#
++    )
++}
++
++fn signal(token: &str) -> String {
++    format!(
++        r#"{{"kind":"signal","target":1,"event_id":2,"trace_id":3,"edge_id":4,"from":99,"source_event_id":5,"value":{token},"training":true,"forward_hops":32,"route_hops":4}}"#
++    )
++}
++
++fn numeric_value(text: &str) -> f32 {
++    match decode_message(text.as_bytes()).unwrap_or_else(|error| panic!("{text}: {error}")) {
++        Message::Backward { gradient, .. } => gradient,
++        Message::Forward { inputs, .. } => inputs[0].value,
++        Message::Signal { value, .. } => value,
++        other => panic!("unexpected message: {other:?}"),
++    }
++}
++
++#[test]
++fn numeric_protocol_captured_decimal_control() {
++    let decimal = backward("0.00005251302718534134");
++    assert_eq!(numeric_value(&decimal), 5.251_302_7e-5_f32);
++}
++
++#[test]
++fn numeric_protocol_captured_scientific_regression() {
++    assert_eq!(CAPTURED.len(), 171);
++    let decimal = numeric_value(&backward("0.00005251302718534134"));
++    assert_eq!(numeric_value(CAPTURED).to_bits(), decimal.to_bits());
++    match decode_message(CAPTURED.as_bytes()).unwrap() {
++        Message::Backward {
++            event_id, target, ..
++        } => {
++            assert_eq!(event_id, 9_720_822_987_784_714_125);
++            assert_eq!(target, 10002);
++        }
++        _ => unreachable!(),
++    }
++}
++
++#[test]
++fn numeric_protocol_equivalent_notation_all_float_fields() {
++    for make in [backward, forward, signal] {
++        for (scientific, decimal) in [
++            ("1e-5", "0.00001"),
++            ("1.25e-1", "0.125"),
++            ("-1.25E-1", "-0.125"),
++            ("1E+2", "100"),
++            ("0e0", "0"),
++            ("-0e0", "-0.0"),
++        ] {
++            let control = numeric_value(&make(decimal));
++            assert_eq!(
++                numeric_value(&make(scientific)).to_bits(),
++                control.to_bits()
++            );
++        }
++    }
++}
++
++#[test]
++fn numeric_protocol_finite_float_limits() {
++    for make in [backward, forward, signal] {
++        for (token, expected) in [
++            ("3.4028234663852886e38", f32::MAX),
++            ("-3.4028234663852886e38", -f32::MAX),
++            ("1.1754943508222875e-38", f32::MIN_POSITIVE),
++            ("1.401298464324817e-45", f32::from_bits(1)),
++            ("1e-50", 0.0),
++        ] {
++            assert_eq!(numeric_value(&make(token)).to_bits(), expected.to_bits());
++        }
++    }
++}
++
++#[test]
++fn numeric_protocol_rejects_overflow_and_nonfinite() {
++    for make in [backward, forward, signal] {
++        for token in [
++            "3.4028235e38",
++            "-3.4028235e38",
++            "3.5e38",
++            "-3.5e38",
++            "1e39",
++            "1e400",
++            "NaN",
++            "Infinity",
++            "-Infinity",
++        ] {
++            let text = make(token);
++            assert!(decode_message(text.as_bytes()).is_err(), "accepted {text}");
++        }
++    }
++}
++
++#[test]
++fn numeric_protocol_rejects_non_numeric_types() {
++    for make in [backward, forward, signal] {
++        for token in [
++            r#""0.125""#,
++            "{}",
++            "[]",
++            "null",
++            "true",
++            "false",
++            r#"{"$serde_json::private::Number":"0.125"}"#,
++        ] {
++            let text = make(token);
++            assert!(decode_message(text.as_bytes()).is_err(), "accepted {text}");
++        }
++    }
++}
++
++#[test]
++fn numeric_protocol_strict_schema() {
++    for mut value in [
++        serde_json::from_str::<Value>(&backward("0.125")).unwrap(),
++        serde_json::from_str::<Value>(&forward("0.125")).unwrap(),
++        serde_json::from_str::<Value>(&signal("0.125")).unwrap(),
++        json!({"kind":"routes"}),
++    ] {
++        value["extra"] = json!(1);
++        assert!(decode_message(&serde_json::to_vec(&value).unwrap()).is_err());
++    }
++    let mut nested = serde_json::from_str::<Value>(&forward("0.125")).unwrap();
++    for pointer in ["/inputs/0", "/expected/0"] {
++        nested.pointer_mut(pointer).unwrap()["extra"] = json!(1);
++        assert!(decode_message(&serde_json::to_vec(&nested).unwrap()).is_err());
++        nested
++            .pointer_mut(pointer)
++            .unwrap()
++            .as_object_mut()
++            .unwrap()
++            .remove("extra");
++    }
++    let mut source = serde_json::from_str::<Value>(&backward("0.125")).unwrap();
++    source["from"]["extra"] = json!(1);
++    assert!(decode_message(&serde_json::to_vec(&source).unwrap()).is_err());
++    assert!(decode_message(
++        br#"{"kind":"gossip","from_node":1,"routes":[{"owner":2,"neuron":3,"epoch":4,"extra":5}]}"#
++    )
++    .is_err());
++    assert!(decode_message(br#"{"kind":"inspect","target":1}"#).is_err());
++    assert!(decode_message(br#"{"kind":"unknown"}"#).is_err());
++    assert!(decode_message(b"null").is_err());
++}
++
++#[test]
++fn numeric_protocol_integer_fidelity_and_rejection() {
++    let cases = [
++        (
++            backward("0.125"),
++            vec!["/target", "/event_id", "/ttl_ms"],
++            vec!["/gradient_hops", "/route_hops"],
++        ),
++        (
++            forward("0.125"),
++            vec![
++                "/target",
++                "/event_id",
++                "/trace_id",
++                "/inputs/0/from",
++                "/inputs/0/source_event_id",
++                "/expected/0/neuron_id",
++                "/expected/0/event_id",
++            ],
++            vec!["/route_hops", "/forward_hops"],
++        ),
++        (
++            signal("0.125"),
++            vec![
++                "/target",
++                "/event_id",
++                "/trace_id",
++                "/edge_id",
++                "/from",
++                "/source_event_id",
++            ],
++            vec!["/forward_hops", "/route_hops"],
++        ),
++        (
++            r#"{"kind":"gossip","from_node":1,"routes":[{"owner":2,"neuron":3,"epoch":4}]}"#.into(),
++            vec![
++                "/from_node",
++                "/routes/0/owner",
++                "/routes/0/neuron",
++                "/routes/0/epoch",
++            ],
++            vec![],
++        ),
++        (
++            r#"{"kind":"inspect","target":1,"route_hops":4}"#.into(),
++            vec!["/target"],
++            vec!["/route_hops"],
++        ),
++        (
++            r#"{"kind":"trace","target":1,"event_id":2,"route_hops":4}"#.into(),
++            vec!["/target", "/event_id"],
++            vec!["/route_hops"],
++        ),
++        (
++            backward("0.125").replace(
++                r#"{"kind":"teacher"}"#,
++                r#"{"kind":"neuron","neuron_id":6,"event_id":7}"#,
++            ),
++            vec!["/from/neuron_id", "/from/event_id"],
++            vec![],
++        ),
++    ];
++    for (text, ids, counters) in cases {
++        let original: Value = serde_json::from_str(&text).unwrap();
++        for (paths, max, overflow) in [
++            (ids, u64::MAX, "18446744073709551616"),
++            (counters, u8::MAX.into(), "256"),
++        ] {
++            for pointer in paths {
++                for integer in [0, 1, max] {
++                    let mut value = original.clone();
++                    *value.pointer_mut(pointer).unwrap() = json!(integer);
++                    let decoded = decode_message(&serde_json::to_vec(&value).unwrap()).unwrap();
++                    let roundtrip = serde_json::to_value(decoded).unwrap();
++                    assert_eq!(roundtrip.pointer(pointer).unwrap().as_u64(), Some(integer));
++                }
++                if max == u64::MAX {
++                    let mut value = original.clone();
++                    *value.pointer_mut(pointer).unwrap() = json!(9_007_199_254_740_993_u64);
++                    let decoded = decode_message(&serde_json::to_vec(&value).unwrap()).unwrap();
++                    assert_eq!(
++                        serde_json::to_value(decoded)
++                            .unwrap()
++                            .pointer(pointer)
++                            .unwrap()
++                            .as_u64(),
++                        Some(9_007_199_254_740_993)
++                    );
++                }
++                for token in [
++                    overflow,
++                    "-1",
++                    "0.5",
++                    "1.0",
++                    "1e0",
++                    "1.000000000000000000001",
++                    "18446744073709551615.0",
++                    r#""1""#,
++                    "null",
++                    "true",
++                    "{}",
++                ] {
++                    // Insert literal text without rounding it through a test-side float.
++                    let mut value = original.clone();
++                    *value.pointer_mut(pointer).unwrap() = json!("NUMERIC_TOKEN");
++                    let candidate = serde_json::to_string(&value)
++                        .unwrap()
++                        .replace(r#""NUMERIC_TOKEN""#, token);
++                    assert!(
++                        decode_message(candidate.as_bytes()).is_err(),
++                        "accepted {pointer}={token}: {candidate}"
++                    );
++                }
++            }
++        }
++    }
++}
+diff --git a/danma-net/tests/numeric_protocol.rs b/danma-net/tests/numeric_protocol.rs
+new file mode 100644
+index 0000000..8648bc9
+--- /dev/null
++++ b/danma-net/tests/numeric_protocol.rs
+@@ -0,0 +1,219 @@
++//! Literal JSON over the production TCP decoder; no test-side float reformatting.
++use danma_core::derived_event_id;
++use danma_net::request;
++use serde_json::{json, Value};
++use std::net::{SocketAddr, TcpListener};
++use std::process::{Child, Command, Stdio};
++use std::time::Duration;
++use tokio::io::{AsyncReadExt, AsyncWriteExt};
++use tokio::net::TcpStream;
++use tokio::time::{sleep, timeout};
++
++static NODE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
++
++struct Node(Child);
++
++impl Drop for Node {
++    fn drop(&mut self) {
++        let _ = self.0.kill();
++        let _ = self.0.wait();
++    }
++}
++
++async fn node() -> (Node, SocketAddr) {
++    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
++    let address = reserved.local_addr().unwrap();
++    drop(reserved);
++    let process = Command::new(env!("CARGO_BIN_EXE_danma-node"))
++        .args([
++            "--id",
++            "1",
++            "--listen",
++            &address.to_string(),
++            "--neuron",
++            "1",
++            "--weight",
++            "99:2",
++            "--neuron",
++            "2",
++            "--weight",
++            "99:2",
++        ])
++        .stdout(Stdio::null())
++        .stderr(Stdio::inherit())
++        .spawn()
++        .unwrap();
++    let node = Node(process);
++    timeout(Duration::from_secs(8), async {
++        loop {
++            if let Ok(response) = request(address, &json!({"kind":"routes"})).await {
++                if response["kind"] == "routes_result" {
++                    break;
++                }
++            }
++            sleep(Duration::from_millis(25)).await;
++        }
++    })
++    .await
++    .expect("node readiness");
++    (node, address)
++}
++
++async fn literal(address: SocketAddr, text: &str) -> Value {
++    timeout(Duration::from_secs(4), async {
++        let mut stream = TcpStream::connect(address).await.unwrap();
++        stream.write_u32(text.len() as u32).await.unwrap();
++        stream.write_all(text.as_bytes()).await.unwrap();
++        let length = stream.read_u32().await.unwrap() as usize;
++        assert!(length <= 256 * 1024);
++        let mut response = vec![0; length];
++        stream.read_exact(&mut response).await.unwrap();
++        serde_json::from_slice(&response).unwrap()
++    })
++    .await
++    .expect("literal request timeout")
++}
++
++fn forward(target: u64, value: &str) -> String {
++    format!(
++        r#"{{"kind":"forward","target":{target},"event_id":18446744073709551615,"trace_id":9007199254740993,"route_hops":4,"inputs":[{{"from":99,"source_event_id":18446744073709551615,"value":{value}}}],"expected":[{{"kind":"teacher"}}]}}"#
++    )
++}
++
++fn backward(target: u64, event: u64, gradient: &str) -> String {
++    format!(
++        r#"{{"kind":"backward","target":{target},"event_id":{event},"from":{{"kind":"teacher"}},"gradient":{gradient},"ttl_ms":3000,"gradient_hops":1,"route_hops":4}}"#
++    )
++}
++
++async fn assert_same_parameters(address: SocketAddr) {
++    let mut states = Vec::new();
++    for target in [1, 2] {
++        let state = request(
++            address,
++            &json!({"kind":"inspect","target":target,"route_hops":4}),
++        )
++        .await
++        .unwrap();
++        assert_eq!(state["kind"], "inspect_result");
++        assert_eq!(state["version"], 1);
++        assert_ne!(state["bias"].as_f64(), Some(0.0));
++        states.push(state);
++    }
++    assert_eq!(states[0]["weights"], states[1]["weights"]);
++    assert_eq!(states[0]["bias"], states[1]["bias"]);
++}
++
++async fn train_pair(input_tokens: [&str; 2], gradient_tokens: [&str; 2]) {
++    let _guard = NODE_LOCK.lock().await;
++    let (_node, address) = node().await;
++    let mut outputs = Vec::new();
++    for (index, target) in [1, 2].into_iter().enumerate() {
++        let output = literal(address, &forward(target, input_tokens[index])).await;
++        assert_eq!(output["kind"], "forward_result", "{output}");
++        outputs.push(output["output"].clone());
++        let trace = request(
++            address,
++            &json!({"kind":"trace","target":target,"event_id":u64::MAX,"route_hops":4}),
++        )
++        .await
++        .unwrap();
++        assert_eq!(trace["event_id"].as_u64(), Some(u64::MAX));
++        assert_eq!(
++            trace["trace"]["trace_id"].as_u64(),
++            Some(9_007_199_254_740_993)
++        );
++        let trained = literal(address, &backward(target, u64::MAX, gradient_tokens[index])).await;
++        assert_eq!(trained["kind"], "backward_result", "{trained}");
++        assert_eq!(trained["status"], "applied");
++        let duplicate = literal(address, &backward(target, u64::MAX, gradient_tokens[index])).await;
++        assert_eq!(duplicate["status"], "ignored_duplicate");
++    }
++    assert_eq!(outputs[0], outputs[1]);
++    assert_same_parameters(address).await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn numeric_protocol_tcp_decimal_training_control() {
++    train_pair(
++        ["0.125", "0.125"],
++        ["0.00005251302718534134", "0.00005251302718534134"],
++    )
++    .await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn numeric_protocol_tcp_scientific_gradient_matches_decimal() {
++    train_pair(
++        ["0.125", "0.125"],
++        ["0.00005251302718534134", "5.251302718534134e-05"],
++    )
++    .await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn numeric_protocol_tcp_scientific_input_matches_decimal() {
++    train_pair(["0.125", "1.25e-1"], ["0.125", "0.125"]).await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn numeric_protocol_tcp_scientific_signal_matches_decimal() {
++    let _guard = NODE_LOCK.lock().await;
++    let (_node, address) = node().await;
++    let mut outputs = Vec::new();
++    for (target, token) in [(1, "-0.125"), (2, "-1.25e-1")] {
++        let event = u64::try_from(derived_event_id(9007199254740993, target)).unwrap();
++        let text = format!(
++            r#"{{"kind":"signal","target":{target},"event_id":{event},"trace_id":9007199254740993,"edge_id":1,"from":99,"source_event_id":18446744073709551615,"value":{token},"training":true,"forward_hops":32,"route_hops":4}}"#
++        );
++        let output = literal(address, &text).await;
++        assert_eq!(output["kind"], "signal_result", "{output}");
++        assert_eq!(output["status"], "fired");
++        outputs.push(output["output"].clone());
++        let trained = literal(address, &backward(target, event, "0.125")).await;
++        assert_eq!(trained["status"], "applied", "{trained}");
++    }
++    assert_eq!(outputs[0], outputs[1]);
++    assert_same_parameters(address).await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn numeric_protocol_tcp_invalid_numbers_cannot_mutate_state() {
++    let _guard = NODE_LOCK.lock().await;
++    let (_node, address) = node().await;
++    for token in [
++        "3.5e38",
++        "-3.5e38",
++        "1e400",
++        "null",
++        "true",
++        r#""0.125""#,
++        r#"{"$serde_json::private::Number":"0.125"}"#,
++    ] {
++        let rejected = literal(address, &forward(1, token)).await;
++        assert_eq!(
++            rejected,
++            json!({"kind":"error","code":"invalid_protocol_message"})
++        );
++    }
++    let created = literal(address, &forward(1, "0.125")).await;
++    assert_eq!(created["kind"], "forward_result");
++    for token in ["3.5e38", "-3.5e38", "1e400", "null", "false", "{}"] {
++        let rejected = literal(address, &backward(1, u64::MAX, token)).await;
++        assert_eq!(
++            rejected,
++            json!({"kind":"error","code":"invalid_protocol_message"})
++        );
++    }
++    let state = request(
++        address,
++        &json!({"kind":"inspect","target":1,"route_hops":4}),
++    )
++    .await
++    .unwrap();
++    assert_eq!(state["version"], 0);
++    assert_eq!(state["bias"].as_f64(), Some(0.0));
++    assert_eq!(state["weights"]["99"].as_f64(), Some(2.0));
++    let trained = literal(address, &backward(1, u64::MAX, "5.251302718534134e-05")).await;
++    assert_eq!(trained["status"], "applied", "{trained}");
++}
