@@ -6,7 +6,7 @@
 mod tensor;
 
 use danma_core::{
-    Feedback, FeedbackSource, FeedbackStatus, Forward, ForwardSignal, Neuron, SignalStatus,
+    derived_event_id, Feedback, FeedbackSource, FeedbackStatus, Forward, ForwardSignal, Neuron, SignalStatus,
     SynapticInput, MAX_AXONS_PER_NEURON, MAX_DENDRITES_PER_NEURON,
 };
 use danma_runtime::{BackwardFailureKind, ForwardFailureKind, LocalDataPlane, LocalLimits};
