@@ -6,9 +6,10 @@
 mod tensor;
 
 use danma_core::{
-    derived_event_id, Feedback, FeedbackSource, FeedbackStatus, Forward, ForwardSignal, Neuron,
-    SignalStatus, SynapticInput, MAX_AXONS_PER_NEURON, MAX_DENDRITES_PER_NEURON,
+    Feedback, FeedbackSource, FeedbackStatus, Forward, ForwardSignal, Neuron, SignalStatus,
+    SynapticInput, MAX_AXONS_PER_NEURON, MAX_DENDRITES_PER_NEURON,
 };
+use danma_runtime::{BackwardFailureKind, ForwardFailureKind, LocalDataPlane, LocalLimits};
 use danma_shard::Shard;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -289,7 +290,8 @@ struct ForwardEmission {
 
 struct NodeState {
     id: u64,
-    shard: Shard,
+    shard: Arc<Shard>,
+    local: LocalDataPlane,
     peers: BTreeMap<u64, SocketAddr>,
     routes: RwLock<BTreeMap<u64, Route>>,
     tensors: RwLock<tensor::TensorRuntime>,
@@ -318,60 +320,108 @@ impl NodeState {
         emission: ForwardEmission,
         axons: &[danma_core::Axon],
     ) -> (Vec<Value>, Vec<Value>) {
-        let mut terminals = Vec::new();
-        let mut unrouted = Vec::new();
-        if axons.is_empty() {
-            terminals.push(json!({
-                "neuron":emission.source,
-                "event_id":emission.source_event_id,
-                "output":emission.output
-            }));
-            return (terminals, unrouted);
-        }
-        if emission.forward_hops == 0 {
-            for axon in axons {
-                unrouted.push(json!({
-                    "target":axon.to,
-                    "edge_id":axon.edge_id,
-                    "reason":"forward_hops_exhausted"
-                }));
-            }
-            return (terminals, unrouted);
-        }
-
-        for axon in axons {
-            let child_event = u64::try_from(derived_event_id(
+        let local = self
+            .local
+            .cascade_forward(
+                emission.source,
+                u128::from(emission.source_event_id),
                 u128::from(emission.trace_id),
-                axon.to,
-            ))
-            .expect("derived v1 EventID always fits u64");
-            let next = Message::Signal {
-                target: axon.to,
-                event_id: child_event,
-                trace_id: emission.trace_id,
-                edge_id: axon.edge_id,
-                from: emission.source,
-                source_event_id: emission.source_event_id,
-                value: emission.output,
-                training: emission.training,
-                forward_hops: emission.forward_hops - 1,
-                route_hops: DEFAULT_ROUTE_HOPS,
-            };
-            let reply = if self.shard.contains(axon.to) {
-                Box::pin(self.process(next)).await
-            } else {
-                match self.target_address(axon.to).await {
-                    Some(address) => self.relay(address, &next).await,
-                    None => {
-                        unrouted.push(json!({
-                            "target":axon.to,
-                            "edge_id":axon.edge_id,
-                            "reason":"no_route"
-                        }));
-                        continue;
-                    }
+                emission.output,
+                emission.training,
+                emission.forward_hops,
+                axons,
+            )
+            .await;
+
+        let mut terminals = local
+            .terminals
+            .into_iter()
+            .map(|terminal| {
+                json!({
+                    "neuron":terminal.neuron_id,
+                    "event_id":terminal.event_id.to_string(),
+                    "output":terminal.output
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut unrouted = local
+            .failures
+            .into_iter()
+            .map(|failure| {
+                let reason = match failure.kind {
+                    ForwardFailureKind::HopLimitExhausted => "forward_hops_exhausted",
+                    ForwardFailureKind::Expired => "expired",
+                    ForwardFailureKind::DeliveryBudgetExceeded => "local_delivery_budget_exceeded",
+                    ForwardFailureKind::RemoteEgressBudgetExceeded => "remote_egress_budget_exceeded",
+                    ForwardFailureKind::Shard(_) => "local_shard_error",
+                };
+                json!({
+                    "target":failure.target,
+                    "edge_id":failure.edge_id,
+                    "reason":reason,
+                    "detail":format!("{:?}", failure.kind)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for remote in local.remote {
+            let event_id = match u64::try_from(remote.event_id) {
+                Ok(value) => value,
+                Err(_) => {
+                    unrouted.push(json!({
+                        "target":remote.target,
+                        "edge_id":remote.edge_id,
+                        "reason":"event_id_out_of_range"
+                    }));
+                    continue;
                 }
             };
+            let trace_id = match u64::try_from(remote.trace_id) {
+                Ok(value) => value,
+                Err(_) => {
+                    unrouted.push(json!({
+                        "target":remote.target,
+                        "edge_id":remote.edge_id,
+                        "reason":"trace_id_out_of_range"
+                    }));
+                    continue;
+                }
+            };
+            let source_event_id = match u64::try_from(remote.source_event_id) {
+                Ok(value) => value,
+                Err(_) => {
+                    unrouted.push(json!({
+                        "target":remote.target,
+                        "edge_id":remote.edge_id,
+                        "reason":"source_event_id_out_of_range"
+                    }));
+                    continue;
+                }
+            };
+            let address = match self.target_address(remote.target).await {
+                Some(address) => address,
+                None => {
+                    unrouted.push(json!({
+                        "target":remote.target,
+                        "edge_id":remote.edge_id,
+                        "reason":"no_route"
+                    }));
+                    continue;
+                }
+            };
+            let next = Message::Signal {
+                target: remote.target,
+                event_id,
+                trace_id,
+                edge_id: remote.edge_id,
+                from: remote.from,
+                source_event_id,
+                value: remote.value,
+                training: remote.training,
+                forward_hops: remote.forward_hops,
+                route_hops: DEFAULT_ROUTE_HOPS,
+            };
+            let reply = self.relay(address, &next).await;
             if reply["kind"] == "signal_result" {
                 if let Some(extra) = reply["terminals"].as_array() {
                     terminals.extend(extra.iter().cloned());
@@ -381,13 +431,14 @@ impl NodeState {
                 }
             } else {
                 unrouted.push(json!({
-                    "target":axon.to,
-                    "edge_id":axon.edge_id,
+                    "target":remote.target,
+                    "edge_id":remote.edge_id,
                     "reason":"delivery_not_confirmed",
                     "response":reply
                 }));
             }
         }
+
         (terminals, unrouted)
     }
 
@@ -869,10 +920,34 @@ impl NodeState {
                         json!({"kind":"backward_result","status":"stale"})
                     }
                     Ok(FeedbackStatus::Applied { upstream, version }) => {
-                        let mut unrouted: Vec<Value> = Vec::new();
-                        for dispatch in upstream {
-                            let dest = dispatch.target_neuron_id;
-                            let core_packet = dispatch.feedback;
+                        let local = self.local.cascade_backward(upstream, deadline).await;
+                        let mut unrouted = local
+                            .failures
+                            .into_iter()
+                            .map(|failure| {
+                                let reason = match failure.kind {
+                                    BackwardFailureKind::Expired => "expired",
+                                    BackwardFailureKind::Stale => "stale",
+                                    BackwardFailureKind::DeliveryBudgetExceeded => {
+                                        "local_delivery_budget_exceeded"
+                                    }
+                                    BackwardFailureKind::RemoteEgressBudgetExceeded => {
+                                        "remote_egress_budget_exceeded"
+                                    }
+                                    BackwardFailureKind::Shard(_) => "local_shard_error",
+                                };
+                                json!({
+                                    "target":failure.target,
+                                    "event_id":failure.event_id.to_string(),
+                                    "reason":reason,
+                                    "detail":format!("{:?}", failure.kind)
+                                })
+                            })
+                            .collect::<Vec<_>>();
+
+                        for remote in local.remote {
+                            let dest = remote.target;
+                            let core_packet = remote.feedback;
                             let remaining = remaining_ms(deadline).min(
                                 core_packet.expires_at_ms.saturating_sub(elapsed_millis()),
                             );
@@ -880,34 +955,35 @@ impl NodeState {
                                 unrouted.push(json!({"target":dest,"reason":"expired"}));
                                 continue;
                             }
-                            let local_target = self.shard.contains(dest);
-                            let address = if local_target {
-                                None
-                            } else {
-                                match self.target_address(dest).await {
-                                    Some(address) => Some(address),
-                                    None => {
-                                        unrouted.push(json!({
-                                            "target":dest,
-                                            "reason":"no_route",
-                                            "event_id":core_packet.event_id.to_string(),
-                                            "gradient":core_packet.gradient
-                                        }));
-                                        continue;
-                                    }
+                            let address = match self.target_address(dest).await {
+                                Some(address) => address,
+                                None => {
+                                    unrouted.push(json!({
+                                        "target":dest,
+                                        "reason":"no_route",
+                                        "event_id":core_packet.event_id.to_string(),
+                                        "gradient":core_packet.gradient
+                                    }));
+                                    continue;
                                 }
                             };
                             let next_source = match Source::try_from(core_packet.from) {
                                 Ok(source) => source,
                                 Err(_) => {
-                                    unrouted.push(json!({"target":dest,"reason":"event_id_out_of_range"}));
+                                    unrouted.push(json!({
+                                        "target":dest,
+                                        "reason":"event_id_out_of_range"
+                                    }));
                                     continue;
                                 }
                             };
                             let parent_event = match u64::try_from(core_packet.event_id) {
                                 Ok(id) => id,
                                 Err(_) => {
-                                    unrouted.push(json!({"target":dest,"reason":"event_id_out_of_range"}));
+                                    unrouted.push(json!({
+                                        "target":dest,
+                                        "reason":"event_id_out_of_range"
+                                    }));
                                     continue;
                                 }
                             };
@@ -918,17 +994,12 @@ impl NodeState {
                                 gradient: core_packet.gradient,
                                 ttl_ms: remaining,
                                 gradient_hops: core_packet.hops_left,
-                                route_hops: 4,
+                                route_hops: DEFAULT_ROUTE_HOPS,
                             };
-                            let reply = if local_target {
-                                // No second TCP request for two neurons sharing a node.
-                                // Box the recursive async call to bound the future size.
-                                Box::pin(self.process(next)).await
-                            } else {
-                                self.relay(address.expect("remote route was checked"), &next).await
-                            };
+                            let reply = self.relay(address, &next).await;
                             if reply["kind"] == "backward_result"
-                                && (reply["status"] == "applied" || reply["status"] == "ignored_duplicate"
+                                && (reply["status"] == "applied"
+                                    || reply["status"] == "ignored_duplicate"
                                     || reply["status"] == "pending")
                             {
                                 if let Some(extra) = reply["unrouted"].as_array() {
@@ -1206,12 +1277,16 @@ pub async fn serve(config: NodeConfig) -> io::Result<()> {
             return Err(invalid("invalid or duplicate bootstrap peer"));
         }
     }
-    let shard = Shard::new(
-        config.neurons,
-        config.worker_threads,
-        config.mailbox_capacity,
-    )
-    .map_err(|_| invalid("invalid CPU shard configuration"))?;
+    let shard = Arc::new(
+        Shard::new(
+            config.neurons,
+            config.worker_threads,
+            config.mailbox_capacity,
+        )
+        .map_err(|_| invalid("invalid CPU shard configuration"))?,
+    );
+    let local = LocalDataPlane::new(Arc::clone(&shard), LocalLimits::default())
+        .map_err(|_| invalid("invalid local data-plane configuration"))?;
     let mut routes = BTreeMap::new();
     for neuron_id in shard.neuron_ids() {
         routes.insert(
@@ -1225,6 +1300,7 @@ pub async fn serve(config: NodeConfig) -> io::Result<()> {
     let state = Arc::new(NodeState {
         id: config.id,
         shard,
+        local,
         peers,
         routes: RwLock::new(routes),
         tensors: RwLock::new(tensor::TensorRuntime::default()),
