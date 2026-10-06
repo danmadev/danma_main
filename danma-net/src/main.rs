@@ -2,6 +2,8 @@ use danma_core::{Activation, Axon, Config, Neuron};
 use danma_net::{serve, NodeConfig, Peer};
 use std::{env, net::SocketAddr, process};
 
+mod neuron_config;
+
 struct NeuronSpec {
     id: u64,
     weights: Vec<(u64, f32)>,
@@ -9,22 +11,43 @@ struct NeuronSpec {
 }
 
 fn parse_flags() -> Result<NodeConfig, String> {
-    let mut args = env::args().skip(1);
+    parse_args(env::args().skip(1))
+}
+
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<NodeConfig, String> {
+    let mut args = args.into_iter();
     let mut id: Option<u64> = None;
     let mut listen: Option<SocketAddr> = None;
     let mut specs: Vec<NeuronSpec> = Vec::new();
+    let mut neuron_file = None;
     let mut worker_threads: usize = 2;
     let mut mailbox_capacity: usize = 256;
     let mut peers = Vec::new();
 
     while let Some(flag) = args.next() {
-        let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for {flag}"))?;
+        if neuron_file.is_some() && matches!(flag.as_str(), "--neuron" | "--weight" | "--axon") {
+            return Err("--neuron-config conflicts with --neuron, --weight and --axon".into());
+        }
         match flag.as_str() {
             "--id" => {
                 id = Some(value.parse().map_err(|_| "invalid node ID")?);
             }
             "--listen" => {
                 listen = Some(value.parse().map_err(|_| "invalid TCP address")?);
+            }
+            "--neuron-config" => {
+                if neuron_file.is_some() {
+                    return Err("--neuron-config may only be supplied once".into());
+                }
+                if !specs.is_empty() {
+                    return Err(
+                        "--neuron-config conflicts with --neuron, --weight and --axon".into(),
+                    );
+                }
+                neuron_file = Some(std::path::PathBuf::from(value));
             }
             "--neuron" => {
                 specs.push(NeuronSpec {
@@ -77,29 +100,33 @@ fn parse_flags() -> Result<NodeConfig, String> {
     }
     let node_id = id.ok_or("--id is required")?;
     let address = listen.ok_or("--listen is required")?;
-    if specs.is_empty() {
-        return Err("at least one --neuron is required".into());
-    }
-    let neurons: Vec<Neuron> = specs
-        .into_iter()
-        .map(|spec| {
-            Neuron::new_with_axons(
-                spec.id,
-                0.0,
-                spec.weights,
-                spec.axons,
-                Config {
-                    activation: Activation::Linear,
-                    learning_rate: 0.1,
-                    activation_ttl_ms: 10_000,
-                    replay_retention_ms: 10_000,
-                    max_live_events: 4_096,
-                    max_staleness_versions: 8,
-                },
-            )
-            .map_err(|error| format!("invalid neuron config for {}: {error:?}", spec.id))
-        })
-        .collect::<Result<_, _>>()?;
+    let neurons: Vec<Neuron> = if let Some(path) = neuron_file {
+        neuron_config::load(&path)?
+    } else {
+        if specs.is_empty() {
+            return Err("at least one --neuron or --neuron-config is required".into());
+        }
+        specs
+            .into_iter()
+            .map(|spec| {
+                Neuron::new_with_axons(
+                    spec.id,
+                    0.0,
+                    spec.weights,
+                    spec.axons,
+                    Config {
+                        activation: Activation::Linear,
+                        learning_rate: 0.1,
+                        activation_ttl_ms: 10_000,
+                        replay_retention_ms: 10_000,
+                        max_live_events: 4_096,
+                        max_staleness_versions: 8,
+                    },
+                )
+                .map_err(|error| format!("invalid neuron config for {}: {error:?}", spec.id))
+            })
+            .collect::<Result<_, _>>()?
+    };
 
     Ok(NodeConfig {
         id: node_id,
@@ -120,8 +147,9 @@ async fn main() {
             eprintln!(
                 "Usage: danma-node --id N --listen 127.0.0.1:PORT \
                  [--workers N] [--mailbox N] \
+                 (--neuron-config PATH | \
                  --neuron ID [--weight SOURCE:WEIGHT]... [--axon EDGE:TARGET]... \
-                 [--neuron ID --weight SOURCE:WEIGHT --axon EDGE:TARGET]... \
+                 [--neuron ID --weight SOURCE:WEIGHT --axon EDGE:TARGET]...) \
                  [--peer NODE_ID@127.0.0.1:PORT]..."
             );
             process::exit(2);

@@ -94,6 +94,94 @@ traces and malformed frames:
 
     cargo test --locked -p danma-core -p danma-shard -p danma-net --all-targets
 
+## Bounded neuron configuration file (v1)
+
+For dense initializations, use `--neuron-config PATH` instead of expanding
+every weight into command-line arguments (which can exceed OS argument limits):
+
+    cargo run --locked -p danma-net --bin danma-node -- \
+      --id 1 --listen 127.0.0.1:9101 --workers 2 --mailbox 256 \
+      --neuron-config node-1.json --peer 2@127.0.0.1:9102
+
+A valid complete document is:
+
+```json
+{
+  "schema_version": 1,
+  "settings": {
+    "learning_rate": 0.1,
+    "activation_ttl_ms": 120000,
+    "replay_retention_ms": 10000,
+    "max_live_events": 4096,
+    "max_staleness_versions": 8
+  },
+  "neurons": [
+    {
+      "id": 10001,
+      "bias": 0.0,
+      "activation": "linear",
+      "weights": [{"source": 20001, "weight": 0.001}]
+    }
+  ]
+}
+```
+
+All displayed keys are **required**; no defaults or additional keys are allowed
+at any object level. Duplicate object keys, duplicate neuron IDs, and duplicate
+sources within one neuron are rejected. The top level is an object, settings is
+an object, neurons and weights are arrays of objects. The version must be the
+JSON integer `1`; activation must be exactly the string `"linear"` or `"relu"`.
+Version 1 has **no axons**; file neurons have empty outgoing axon lists. Existing
+legacy `--axon` support is unchanged.
+
+Limits (inclusive unless stated otherwise):
+
+| Field/resource | Contract |
+| --- | --- |
+| File | At most 16 MiB (16,777,216 bytes), including whitespace |
+| Neurons | 1–256 per file |
+| Weights | 0–1024 per neuron; at most 262,144 total per file |
+| id, source | JSON integers, 1–18,446,744,073,709,551,615; exact unsigned 64-bit parsing, never through a float |
+| bias, weight | JSON numbers finite and within ±float32 maximum before narrowing; decimal/scientific notation and integers accepted |
+| learning_rate | Same numeric decoder, then float32 value strictly positive and at most 1 |
+| activation_ttl_ms, replay_retention_ms | JSON integers, 1–600,000 milliseconds |
+| max_live_events | JSON integer, 1–4096; shared capacity for traces and tombstones per neuron |
+| max_staleness_versions | JSON integer, 0–8 |
+
+Numeric strings, booleans, nulls, objects and arrays are not numbers. Fractional
+or scientific tokens are not accepted for integer fields, even if mathematically
+integral. Float fields use the existing wire decoder's finite float64 range
+check before conversion to float32, with accurate JSON float parsing. Normal
+float32 rounding applies; very small magnitudes may underflow to zero (which
+is invalid for learning_rate). Empty weight arrays permit bias-only neurons,
+matching the core constructor contract; an empty neuron array is invalid.
+
+The reader consumes at most limit+1 bytes and does not trust file metadata.
+JSON parsing is directly into strict typed structs with bounded array visitors;
+it rejects excess array elements without storing them and retains the parser's
+normal nesting limit. The byte buffer, parsed vectors and core weight maps
+still incur bounded memory/CPU costs; 16 MiB is an input cap, **not** a promise
+that total startup memory is 16 MiB. The whole document is validated before
+core construction, shard workers or the TCP listener. Failure exits nonzero;
+there is no fallback to legacy flags. This is startup-only loading, not reload
+or checkpoint support.
+
+`--neuron-config` can appear only once and is mutually exclusive with every
+`--neuron`, `--weight` and `--axon` flag. Node identity, listen address, peers,
+workers and mailbox remain CLI-only. Legacy defaults are unchanged: zero bias,
+linear activation, learning rate 0.1, activation TTL 10,000 ms, replay retention
+10,000 ms, 4096 live events and staleness 8.
+
+The authorized 784→1000→ReLU→10 layout has 1010 logical neurons across ten
+processes (101 per file): hidden neurons have 784 weights and output neurons
+1000 weights, totaling 794,000 weights plus 1010 biases = 795,010 parameters.
+These fit the file bounds. The parent experiment must generate the shared
+float32 initialization and assign neuron ownership; the loader does neither.
+Use `"relu"` for hidden neurons and `"linear"` for outputs. A 120,000 ms trace
+TTL can accommodate a long sequential forward pass, but must be measured by
+the experiment; it does **not** extend a feedback packet's relative deadline.
+No MNIST performance or completion claim is made by this loader.
+
 ## Known gaps and non-goals
 
 **Security:** the entire v1 network is restricted to loopback addresses.
