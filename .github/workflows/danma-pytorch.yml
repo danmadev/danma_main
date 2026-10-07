@@ -69,3 +69,8 @@ jobs:
         env:
           DANMA_NODE_BIN: target/debug/danma-node
         run: python -m unittest discover -s python/benchmark_tests -p "test_mnist_shard.py" -v
+      - name: Run three-node Rust shard MNIST CPU parity smoke
+        if: ${{ always() }}
+        env:
+          DANMA_NODE_BIN: target/debug/danma-node
+        run: python -m unittest discover -s python/benchmark_tests -p "test_mnist_rust_3node.py" -v
