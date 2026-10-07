@@ -12,6 +12,7 @@ import json
 import math
 import socket
 import struct
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -74,32 +75,56 @@ class DANMAClient:
         self.timeout_seconds = float(timeout_seconds)
 
     def request(self, message: dict[str, Any]) -> dict[str, Any]:
+        total_started = time.perf_counter()
+        encode_started = time.perf_counter()
         try:
             encoded = json.dumps(
                 message, allow_nan=False, separators=(",", ":")
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise DANMAError(f"cannot encode DANMA request: {exc}") from exc
+        encode_seconds = time.perf_counter() - encode_started
         if not 0 < len(encoded) <= MAX_FRAME_BYTES:
             raise DANMAError("DANMA request exceeds 256 KiB protocol frame limit")
         try:
-            with socket.create_connection(
+            connect_started = time.perf_counter()
+            stream = socket.create_connection(
                 (self.host, self.port), timeout=self.timeout_seconds
-            ) as stream:
+            )
+            connect_seconds = time.perf_counter() - connect_started
+            with stream:
                 stream.settimeout(self.timeout_seconds)
+                send_started = time.perf_counter()
                 stream.sendall(struct.pack(">I", len(encoded)) + encoded)
+                send_seconds = time.perf_counter() - send_started
+
+                receive_started = time.perf_counter()
                 frame_length = struct.unpack(">I", _read_exact(stream, 4))[0]
                 if not 0 < frame_length <= MAX_FRAME_BYTES:
                     raise DANMAError("invalid or oversized DANMA response frame")
                 payload = _read_exact(stream, frame_length)
+                receive_seconds = time.perf_counter() - receive_started
         except (OSError, ConnectionError) as exc:
             raise DANMATransportError(
                 f"DANMA transport failure; remote effect may have committed: {exc}"
             ) from exc
+
+        decode_started = time.perf_counter()
         try:
             reply = json.loads(payload)
         except (UnicodeError, ValueError) as exc:
             raise DANMAError(f"invalid DANMA JSON response: {exc}") from exc
+        decode_seconds = time.perf_counter() - decode_started
+        self.last_request_timing = {
+            "encode_seconds": encode_seconds,
+            "connect_seconds": connect_seconds,
+            "send_seconds": send_seconds,
+            "receive_seconds": receive_seconds,
+            "decode_seconds": decode_seconds,
+            "total_seconds": time.perf_counter() - total_started,
+            "request_bytes": len(encoded),
+            "response_bytes": len(payload),
+        }
         if not isinstance(reply, dict):
             raise DANMAError("DANMA response must be a JSON object")
         if reply.get("kind") == "error":
