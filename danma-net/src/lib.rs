@@ -646,6 +646,7 @@ impl NodeState {
                 inputs,
                 training,
             } => {
+                let process_started = Instant::now();
                 if targets.is_empty()
                     || targets.len() > MAX_SHARD_TARGETS
                     || inputs.is_empty()
@@ -674,6 +675,8 @@ impl NodeState {
                     }
                 }
 
+                let validation_us = process_started.elapsed().as_micros() as u64;
+                let build_started = Instant::now();
                 let items = targets
                     .iter()
                     .map(|item| {
@@ -700,11 +703,15 @@ impl NodeState {
                         )
                     })
                     .collect();
+                let build_items_us = build_started.elapsed().as_micros() as u64;
 
+                let shard_started = Instant::now();
                 let outcomes = match self.shard.forward_batch(items).await {
                     Ok(outcomes) => outcomes,
                     Err(err) => return error_response(&format!("forward_shard_{err:?}")),
                 };
+                let shard_batch_us = shard_started.elapsed().as_micros() as u64;
+                let result_started = Instant::now();
                 let mut by_target = BTreeMap::new();
                 for (target, result) in outcomes {
                     by_target.insert(target, result);
@@ -757,10 +764,18 @@ impl NodeState {
                         }
                     }
                 }
+                let result_build_us = result_started.elapsed().as_micros() as u64;
                 json!({
                     "kind":"forward_shard_result",
                     "status":if all_ok {"ok"} else {"partial"},
-                    "results":results
+                    "results":results,
+                    "timing_us":{
+                        "validation":validation_us,
+                        "build_items":build_items_us,
+                        "shard_batch":shard_batch_us,
+                        "result_build":result_build_us,
+                        "process_total":process_started.elapsed().as_micros() as u64
+                    }
                 })
             }
             Message::Signal {
@@ -874,6 +889,8 @@ impl NodeState {
                 if ttl_ms == 0 {
                     return json!({"kind":"backward_result","status":"expired"});
                 }
+                let validation_us = process_started.elapsed().as_micros() as u64;
+                let build_started = Instant::now();
                 let deadline = match Instant::now().checked_add(Duration::from_millis(ttl_ms)) {
                     Some(deadline) => deadline,
                     None => return error_response("invalid_ttl"),
@@ -1034,6 +1051,7 @@ impl NodeState {
                 ttl_ms,
                 gradient_hops,
             } => {
+                let process_started = Instant::now();
                 if targets.is_empty()
                     || targets.len() > MAX_SHARD_TARGETS
                     || input_ids.is_empty()
@@ -1087,11 +1105,15 @@ impl NodeState {
                         )
                     })
                     .collect();
+                let build_packets_us = build_started.elapsed().as_micros() as u64;
 
+                let shard_started = Instant::now();
                 let outcomes = match self.shard.backward_batch_live(packets, deadline).await {
                     Ok(outcomes) => outcomes,
                     Err(err) => return error_response(&format!("backward_shard_{err:?}")),
                 };
+                let shard_batch_us = shard_started.elapsed().as_micros() as u64;
+                let aggregate_started = Instant::now();
                 let mut by_target = BTreeMap::new();
                 for (target, result) in outcomes {
                     by_target.insert(target, result);
@@ -1174,11 +1196,19 @@ impl NodeState {
                         }
                     }
                 }
+                let aggregate_us = aggregate_started.elapsed().as_micros() as u64;
                 json!({
                     "kind":"backward_shard_result",
                     "status":if all_applied {"applied"} else {"partial"},
                     "results":results,
-                    "input_gradients":accumulated
+                    "input_gradients":accumulated,
+                    "timing_us":{
+                        "validation":validation_us,
+                        "build_packets":build_packets_us,
+                        "shard_batch":shard_batch_us,
+                        "aggregate":aggregate_us,
+                        "process_total":process_started.elapsed().as_micros() as u64
+                    }
                 })
             }
         }
