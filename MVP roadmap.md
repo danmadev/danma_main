@@ -118,3 +118,144 @@ the TCP data plane, while PyTorch supplies autograd orchestration and can
 compute the loss on CPU. Generic `aten::mm`, `aten::add` and arbitrary ATen
 coverage are intentionally not registered yet; using such operations directly
 on a DANMA tensor fails closed.
+
+
+## 3. Adaptive Neuron Lifecycle / Neurogenesis
+
+Goal: Allow DANMA to continuously remove persistently ineffective neurons and create new neurons without stopping the network or introducing a global training epoch.
+
+Important distinction: the earlier idea of periodically replacing a fraction of the worst connections applies to dendrites/edges. Neuron replacement is a separate, more conservative lifecycle and must not blindly reuse a fixed "replace 25%" rule.
+
+### Phase 1: Neuron Utility Telemetry
+
+#### 3.1 Track local neuron effectiveness
+
+Task: Add bounded, windowed/EWMA statistics to each neuron or its shard-owned metadata. At minimum track activation count, completed feedback count, useful downstream contribution, gradient/update magnitude, age/sample count, and enough information to detect prolonged inactivity or redundancy.
+
+Selection must not classify a neuron as ineffective merely because it fires rarely; rare but strongly useful neurons must survive.
+
+Definition of Done:
+- Per-neuron utility telemetry is bounded in memory and updated without global synchronization.
+- Utility statistics are inspectable through the existing shard/runtime observability path.
+- Tests cover frequent-use, rare-but-useful, inactive, and persistently low-contribution neurons.
+
+#### 3.2 Define a configurable `utility_score` and retirement policy
+
+Task: Introduce a local policy that ranks retirement candidates using multiple signals rather than one threshold. Include minimum neuron age / minimum sample count, hysteresis, a configurable evaluation window, and a bounded replacement budget per window.
+
+Definition of Done:
+- Newly created or insufficiently sampled neurons cannot be retired prematurely.
+- Rare but high-impact neurons are not selected solely due to low activation count.
+- Replacement budget is configurable and bounded; neuron replacement has no hard-coded 25% default.
+- Deterministic tests verify candidate ranking for synthetic histories.
+
+### Phase 2: Safe Retirement State Machine
+
+#### 3.3 Add neuron lifecycle states
+
+Task: Add explicit lifecycle states such as `ACTIVE -> DRAINING -> RETIRED`.
+
+When a neuron becomes `DRAINING`, routing must stop sending new forward activations to it, while already accepted activations remain valid until their feedback completes or their existing TTL expires.
+
+Definition of Done:
+- No new forward event is accepted after a neuron enters `DRAINING`.
+- Existing pending `EventID` records can still complete normally.
+- Retirement does not violate current feedback deduplication, replay-retention, or TTL invariants.
+
+#### 3.4 Make late messages safe
+
+Task: Preserve enough retirement/tombstone information so that delayed or duplicated forward/feedback packets for an old neuron generation cannot mutate a new neuron.
+
+A retired `NeuronID` must never be immediately reused for a different neuron. Prefer globally unique/monotonic IDs; if generations are ever introduced, messages and routes must include the generation/epoch and reject stale generations.
+
+Definition of Done:
+- Delayed feedback after retirement is rejected or classified as expired/stale, never applied to another neuron.
+- Duplicate delivery remains idempotent.
+- Property/integration tests cover delayed, reordered, duplicated and post-retirement packets.
+
+### Phase 3: Dynamic Shard Membership and Routing
+
+#### 3.5 Support runtime add/drain/remove operations
+
+Task: Replace the current startup-only immutable neuron ownership assumption with a controlled mutable lifecycle API. Add shard/runtime operations to register a neuron, begin drain, finalize removal, and inspect lifecycle state.
+
+Definition of Done:
+- A running shard can add a neuron without restart.
+- A running shard can drain and remove a neuron after outstanding activations are resolved or expired.
+- Ownership changes are serialized/fenced so stale workers cannot resurrect or update a retired neuron.
+- Existing static startup path remains supported.
+
+#### 3.6 Version route updates
+
+Task: Propagate neuron creation/retirement and ownership changes through the DANMA control plane / routing mechanism using versioned route records. Gossip may distribute discovery/update information, but the data plane should still use direct delivery once the owner is known.
+
+Definition of Done:
+- Peers eventually learn that a retired neuron is unavailable and that a new neuron has an owner.
+- Stale route information cannot cause state mutation on the wrong neuron generation.
+- Tests cover concurrent route update, node delay, duplicate gossip, and stale-route delivery.
+
+### Phase 4: Neurogenesis
+
+#### 3.7 Create replacement neurons
+
+Task: After a neuron reaches `RETIRED` and its slot/capacity becomes available, create a replacement with a new `NeuronID`.
+
+Initial connectivity should combine exploitation and exploration:
+- exploitation: sample useful nearby/upstream/downstream structure from successful neurons;
+- exploration: add randomized valid connections so the network can discover new representations.
+
+The exploitation/exploration ratio must be configurable and experimentally measured rather than hard-coded as an architectural invariant.
+
+Definition of Done:
+- New neuron receives a fresh identity, initialized bias/weights, valid bounded dendrites/axons, and a registered owner/route.
+- New connectivity respects `MAX_DENDRITES_PER_NEURON` and `MAX_AXONS_PER_NEURON`.
+- Seeded tests reproduce topology generation; unseeded mode produces diversity.
+- No dangling references remain to a physically removed neuron.
+
+#### 3.8 Add probation / maturation period
+
+Task: Give a newly created neuron a configurable probation period during which it learns normally but is protected from immediate retirement. After sufficient age/samples it enters the normal utility competition.
+
+Definition of Done:
+- New neurons survive the minimum maturation period.
+- Their utility history starts cleanly and cannot inherit stale statistics from a retired neuron.
+- After maturation, they are evaluated by the same policy as all other active neurons.
+
+### Phase 5: Verification and Experiments
+
+#### 3.9 Prove lifecycle safety under asynchronous execution
+
+Task: Add deterministic simulation/property tests for lifecycle transitions while forward/backward traffic is in flight.
+
+Required scenarios:
+- retire while feedback is delayed;
+- duplicate feedback during drain;
+- TTL expiration during drain;
+- stale route after retirement;
+- new neuron created while old packets are still in the network;
+- shard/node restart during `DRAINING`;
+- repeated create/retire cycles under bounded capacity.
+
+Definition of Done:
+- No feedback is ever applied to the wrong neuron identity/generation.
+- One legitimate feedback contribution is applied at most once according to the existing contribution identity rules.
+- No neuron disappears while it still owns an unexpired activation unless recovery semantics explicitly preserve that activation.
+- Memory used by lifecycle metadata, tombstones and telemetry remains bounded.
+
+#### 3.10 Evaluate whether neurogenesis improves learning
+
+Task: Compare fixed-topology DANMA with adaptive-neurogenesis DANMA on the same workloads and seeds.
+
+Measure at least:
+- validation loss / accuracy;
+- convergence speed;
+- neuron utilization distribution;
+- number of retirements and births;
+- topology churn;
+- network traffic;
+- CPU/RAM overhead;
+- recovery from deliberately degraded or redundant neuron populations.
+
+Definition of Done:
+- Experiment artifacts make it possible to determine whether adaptive neuron replacement improves model quality or resource efficiency.
+- Neurogenesis can be disabled with a feature/config flag so fixed-topology behavior remains a reference baseline.
