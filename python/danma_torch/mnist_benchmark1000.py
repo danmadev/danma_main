@@ -51,8 +51,8 @@ class Layout:
         for value in (self.inputs, self.hidden, self.outputs):
             if type(value) is not int or not 1 <= value <= 1024:
                 raise ValueError('dimensions must be 1..1024')
-        if type(self.nodes) is not int or not 1 <= self.nodes <= 10:
-            raise ValueError('internal nodes must be 1..10')
+        if type(self.nodes) is not int or self.nodes < 1:
+            raise ValueError('internal nodes must be a positive integer')
         groups = (self.neuron_ids, self.input_ids, self.feature_ids)
         for group in groups:
             for value in group:
@@ -571,7 +571,8 @@ def run_remote(context, metrics, *, checkpoint):
         metrics['initial_state_sha256'] = tensor_digest(state)
         checkpoint()
         model_cls = context.get('remote_model_cls', RemoteModel)
-        model = model_cls(cluster.client, layout)
+        from_cluster = getattr(model_cls, 'from_cluster', None)
+        model = from_cluster(cluster, layout) if from_cluster is not None else model_cls(cluster.client, layout)
         return train_and_measure(model, context['initial'], context['dataset'], context['orders'],
                                  torch.device('cpu'), metrics, checkpoint=checkpoint, cluster=cluster)
     except Exception:
