@@ -571,7 +571,8 @@ def run_remote(context, metrics, *, checkpoint):
         metrics['initial_state_sha256'] = tensor_digest(state)
         checkpoint()
         model_cls = context.get('remote_model_cls', RemoteModel)
-        model = model_cls(cluster.client, layout)
+        from_cluster = getattr(model_cls, 'from_cluster', None)
+        model = from_cluster(cluster, layout) if from_cluster is not None else model_cls(cluster.client, layout)
         return train_and_measure(model, context['initial'], context['dataset'], context['orders'],
                                  torch.device('cpu'), metrics, checkpoint=checkpoint, cluster=cluster)
     except Exception:
