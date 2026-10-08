@@ -889,8 +889,6 @@ impl NodeState {
                 if ttl_ms == 0 {
                     return json!({"kind":"backward_result","status":"expired"});
                 }
-                let validation_us = process_started.elapsed().as_micros() as u64;
-                let build_started = Instant::now();
                 let deadline = match Instant::now().checked_add(Duration::from_millis(ttl_ms)) {
                     Some(deadline) => deadline,
                     None => return error_response("invalid_ttl"),
@@ -1085,6 +1083,8 @@ impl NodeState {
                     }
                 }
 
+                let validation_us = process_started.elapsed().as_micros() as u64;
+                let build_started = Instant::now();
                 let deadline = match Instant::now().checked_add(Duration::from_millis(ttl_ms)) {
                     Some(deadline) => deadline,
                     None => return error_response("invalid_ttl"),
