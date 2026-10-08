@@ -1,1 +1,11 @@
-"""Backward-compatible alias for the configurable multi-node MNIST benchmark.\n\nUse python -m danma_torch.mnist_rust_multinode --nodes N for new runs.\nThe default remains three nodes.\n"""\nfrom .mnist_rust_multinode import *  # noqa: F401,F403\nfrom .mnist_rust_multinode import main\n\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n
+"""Backward-compatible alias for the configurable multi-node MNIST benchmark.
+
+Use python -m danma_torch.mnist_rust_multinode --nodes N for new runs.
+The default remains three nodes.
+"""
+from .mnist_rust_multinode import *  # noqa: F401,F403
+from .mnist_rust_multinode import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
