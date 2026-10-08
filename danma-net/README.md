@@ -138,9 +138,9 @@ Limits (inclusive unless stated otherwise):
 
 | Field/resource | Contract |
 | --- | --- |
-| File | At most 16 MiB (16,777,216 bytes), including whitespace |
-| Neurons | 1–256 per file |
-| Weights | 0–1024 per neuron; at most 262,144 total per file |
+| File | At most 64 MiB (67,108,864 bytes), including whitespace |
+| Neurons | 1–2048 per file |
+| Weights | 0–1024 per neuron; at most 1,048,576 total per file |
 | id, source | JSON integers, 1–18,446,744,073,709,551,615; exact unsigned 64-bit parsing, never through a float |
 | bias, weight | JSON numbers finite and within ±float32 maximum before narrowing; decimal/scientific notation and integers accepted |
 | learning_rate | Same numeric decoder, then float32 value strictly positive and at most 1 |
@@ -160,8 +160,8 @@ The reader consumes at most limit+1 bytes and does not trust file metadata.
 JSON parsing is directly into strict typed structs with bounded array visitors;
 it rejects excess array elements without storing them and retains the parser's
 normal nesting limit. The byte buffer, parsed vectors and core weight maps
-still incur bounded memory/CPU costs; 16 MiB is an input cap, **not** a promise
-that total startup memory is 16 MiB. The whole document is validated before
+still incur bounded memory/CPU costs; 64 MiB is an input cap, **not** a promise
+that total startup memory is 64 MiB. The whole document is validated before
 core construction, shard workers or the TCP listener. Failure exits nonzero;
 there is no fallback to legacy flags. This is startup-only loading, not reload
 or checkpoint support.
@@ -177,6 +177,8 @@ processes (101 per file): hidden neurons have 784 weights and output neurons
 1000 weights, totaling 794,000 weights plus 1010 biases = 795,010 parameters.
 These fit the file bounds. The parent experiment must generate the shared
 float32 initialization and assign neuron ownership; the loader does neither.
+
+The experimental [single-node MNIST runner](../python/MNIST_SINGLE_NODE.md) uses the same bounded file format with one process. Its default 1000-hidden layout owns 1010 logical neurons and 794,000 weights in one node; `--hidden-neurons` can vary the hidden width from 1 to 1024 without source changes.
 Use `"relu"` for hidden neurons and `"linear"` for outputs. A 120,000 ms trace
 TTL can accommodate a long sequential forward pass, but must be measured by
 the experiment; it does **not** extend a feedback packet's relative deadline.

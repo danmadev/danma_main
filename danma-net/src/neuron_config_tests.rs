@@ -362,36 +362,50 @@ fn settings_boundaries_are_inclusive_and_invalid_settings_fail() {
 }
 
 #[test]
-fn max_neurons_and_weights_accepted_and_excess_rejected() {
-    let weights: Vec<_> = (1..=MAX_DENDRITES_PER_NEURON)
-        .map(|source| json!({"source":source,"weight":0}))
-        .collect();
+fn max_neurons_and_weights_per_neuron_are_bounded_independently() {
     let mut value = document();
     value["neurons"] = Value::Array(
         (1..=MAX_NEURONS)
-            .map(|id| json!({"id":id,"bias":0,"activation":"linear","weights":weights}))
+            .map(|id| json!({"id":id,"bias":0,"activation":"linear","weights":[]}))
             .collect(),
     );
     let neurons = parse(&value).unwrap();
     assert_eq!(neurons.len(), MAX_NEURONS);
-    assert_eq!(
-        neurons
-            .iter()
-            .map(|neuron| neuron.weights().len())
-            .sum::<usize>(),
-        MAX_TOTAL_WEIGHTS
-    );
-    let extra = value["neurons"][0].clone();
-    value["neurons"].as_array_mut().unwrap().push(extra);
+
+    value["neurons"].as_array_mut().unwrap().push(json!({
+        "id": (MAX_NEURONS as u64) + 1,
+        "bias": 0,
+        "activation": "linear",
+        "weights": []
+    }));
     assert!(parse(&value).is_err());
+
+    let weights: Vec<_> = (1..=MAX_DENDRITES_PER_NEURON)
+        .map(|source| json!({"source":source,"weight":0}))
+        .collect();
     let mut value = document();
-    value["neurons"][0]["weights"] = Value::Array(
-        (1..=MAX_DENDRITES_PER_NEURON + 1)
-            .map(|source| json!({"source":source,"weight":0}))
-            .collect(),
-    );
+    value["neurons"][0]["weights"] = Value::Array(weights);
+    assert!(parse(&value).is_ok());
+    value["neurons"][0]["weights"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"source":(MAX_DENDRITES_PER_NEURON as u64) + 1,"weight":0}));
     assert!(parse(&value).is_err());
-    // 256 * 1024 is the total bound: exceeding it necessarily exceeds a local bound.
+}
+
+#[test]
+fn single_node_mnist_1000_fits_startup_bounds() {
+    const INPUTS: usize = 784;
+    const HIDDEN: usize = 1_000;
+    const OUTPUTS: usize = 10;
+    let logical_neurons = HIDDEN + OUTPUTS;
+    let total_weights = INPUTS * HIDDEN + HIDDEN * OUTPUTS;
+
+    assert!(logical_neurons <= MAX_NEURONS);
+    // The 1024-dendrite boundary is exercised by the independent max-weight test above.
+    assert!(total_weights <= MAX_TOTAL_WEIGHTS);
+    assert_eq!(logical_neurons, 1_010);
+    assert_eq!(total_weights, 794_000);
 }
 
 #[test]

@@ -107,8 +107,9 @@ the report and process fail. The default binary is the release node.
 Every process reads its retained configuration from the run directory's
 `configs/`, using schema version 1, linear activation, learning rate 0.1,
 activation TTL 120000 ms, replay retention 10000 ms, live-event bound 4096,
-and staleness bound 8. Generated files obey 16 MiB/256-neuron/1024-fan-in/
-262144-total-weight bounds and contain no axons. All nine other processes
+and staleness bound 8. Runtime v1 now permits up to 64 MiB, 2048 neurons,
+1024 fan-in per neuron and 1,048,576 total weights per file. This fixed ten-node
+benchmark still writes only 101 neurons per file and contains no axons. All nine other processes
 are bootstrap peers. Per-process combined logs remain in `logs/`.
 
 Ports are reserved together, then released immediately before each spawn.
