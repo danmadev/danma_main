@@ -52,7 +52,7 @@ class RustThreeNodeMNISTUnitTests(unittest.TestCase):
         )
         self.assertEqual(
             bench.expected_rpc_per_sample(layout),
-            {"forward": 4, "backward": 4, "train_total": 8},
+            {"hidden_owners": 3, "output_owners": 1, "forward": 4, "backward": 4, "train_total": 8},
         )
 
     def test_multinode_client_partitions_targets_and_reduces_dx(self):
@@ -85,11 +85,10 @@ class RustThreeNodeMNISTUnitTests(unittest.TestCase):
         self.assertEqual(dx, [6.0, 6.0])
         self.assertEqual([len(item.backward_calls) for item in clients], [1, 1, 1])
 
-    def test_cli_is_fixed_to_three_nodes(self):
+    def test_legacy_alias_supports_configurable_nodes(self):
         args = bench.parse_args(["--nodes", "3", "--backends", "cpu"])
         self.assertEqual(args.nodes, 3)
-        with self.assertRaises(SystemExit):
-            bench.parse_args(["--nodes", "1"])
+        self.assertEqual(bench.parse_args(["--nodes", "1", "--backends", "cpu"]).nodes, 1)
         with self.assertRaises(SystemExit):
             bench.parse_args(["--node", "3"])
 
