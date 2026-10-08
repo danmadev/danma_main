@@ -243,16 +243,36 @@ def write_configs(directory, layout, initial):
 
 
 class CountingClient(DANMAClient):
-    """Logical attempts at this client, not wire relays or a runtime profiler."""
-    def __init__(self, port, counts):
+    """Logical attempts plus bounded aggregate timing diagnostics."""
+    def __init__(self, port, counts, profiles):
         super().__init__('127.0.0.1', port, timeout_seconds=4)
         self.counts = counts
+        self.profiles = profiles
         self.phase = 'readiness'
+
+    @staticmethod
+    def _accumulate(target, name, value):
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            return
+        slot = target.setdefault(name, {'sum': 0.0, 'max': 0.0})
+        value = float(value)
+        slot['sum'] += value
+        slot['max'] = max(slot['max'], value)
 
     def request(self, message):
         key = f"{self.phase}:{message['kind']}"
         self.counts[key] = self.counts.get(key, 0) + 1
-        return super().request(message)
+        reply = super().request(message)
+        if message['kind'] in ('forward_shard', 'backward_shard'):
+            profile = self.profiles.setdefault(key, {'count': 0, 'client': {}, 'server_us': {}})
+            profile['count'] += 1
+            for name, value in getattr(self, 'last_request_timing', {}).items():
+                self._accumulate(profile['client'], name, value)
+            timing = reply.get('timing_us')
+            if isinstance(timing, dict):
+                for name, value in timing.items():
+                    self._accumulate(profile['server_us'], name, value)
+        return reply
 
 
 class Cluster:
@@ -262,6 +282,7 @@ class Cluster:
         self.startup_timeout = startup_timeout
         self.processes, self.logs, self.reservations = [], [], []
         self.counts = {}
+        self.profiles = {}
         self.timings = {}
         self.metadata = []
         self.clients = []
@@ -282,7 +303,7 @@ class Cluster:
                 self.reservations.append(sock)
                 sock.bind(('127.0.0.1', 0))
                 ports.append(sock.getsockname()[1])
-            self.clients = [CountingClient(port, self.counts) for port in ports]
+            self.clients = [CountingClient(port, self.counts, self.profiles) for port in ports]
             self.client = self.clients[0]
             log_dir = self.run_dir / 'logs'
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -593,6 +614,26 @@ def run_remote(context, metrics, *, checkpoint):
         metrics['end_to_end_seconds'] = time.perf_counter() - started
         metrics['children_stopped'] = all(p.poll() is not None for p in cluster.processes)
         metrics['logical_request_total'] = sum(cluster.counts.values())
+        profile_summary = {}
+        for key, raw in cluster.profiles.items():
+            count = raw.get('count', 0)
+            if not count:
+                continue
+            item = {'count': count, 'client': {}, 'server_ms': {}}
+            for name, values in raw.get('client', {}).items():
+                scale = 1000.0 if name.endswith('_seconds') else 1.0
+                unit_name = name[:-8] + '_ms' if name.endswith('_seconds') else name
+                item['client'][unit_name] = {
+                    'mean': values['sum'] * scale / count,
+                    'max': values['max'] * scale,
+                }
+            for name, values in raw.get('server_us', {}).items():
+                item['server_ms'][name] = {
+                    'mean': values['sum'] / 1000.0 / count,
+                    'max': values['max'] / 1000.0,
+                }
+            profile_summary[key] = item
+        metrics['request_profiles'] = profile_summary
         kind_totals = Counter()
         for key, count in cluster.counts.items():
             kind_totals[key.rsplit(':', 1)[-1]] += count

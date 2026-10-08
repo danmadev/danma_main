@@ -86,7 +86,7 @@ class ContractTests(unittest.TestCase):
 
     def test_logical_counter_records_failed_attempt(self):
         counts = {}
-        client = b.CountingClient(12345, counts)
+        client = b.CountingClient(12345, counts, {})
         client.phase = 'train'
         with mock.patch.object(b.DANMAClient, 'request', side_effect=b.DANMAError('failed')):
             with self.assertRaises(b.DANMAError):

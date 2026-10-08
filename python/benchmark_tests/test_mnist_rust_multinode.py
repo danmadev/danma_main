@@ -196,6 +196,16 @@ class RealRustMultiNodeMNISTTests(unittest.TestCase):
                     bench.make_layout(1000, nodes)
                 )
                 requests = report["results"]["danma"]["logical_requests"]
+                profiles = report["results"]["danma"]["request_profiles"]
+                for operation, count in (("forward_shard", expected["forward"]),
+                                         ("backward_shard", expected["backward"])):
+                    profile = profiles[f"train:{operation}"]
+                    self.assertEqual(profile["count"], count)
+                    self.assertGreater(profile["client"]["total_ms"]["mean"], 0)
+                    self.assertGreater(profile["server_ms"]["process_total"]["mean"], 0)
+                    self.assertGreaterEqual(
+                        profile["server_ms"]["shard_batch"]["mean"], 0
+                    )
                 self.assertEqual(
                     requests.get("train:forward_shard"),
                     expected["forward"],
